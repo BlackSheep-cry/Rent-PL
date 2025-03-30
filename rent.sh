@@ -1,12 +1,11 @@
 #!/bin/bash
 
-VERSION="V0.4.0"
+VERSION="V0.5.0"
 IPTABLES_PATH="/usr/sbin/iptables"
 IP6TABLES_PATH="/usr/sbin/ip6tables"
 CONFIG_FILE="/etc/rent/config"
 CP_FILE="/etc/rent/config.original"
 LOG_FILE="/var/log/rent.log"
-LOG_FILE_2="/var/log/rent_cron.log"
 TRAFFIC_SAVE_FILE="/var/log/rent_usage.dat"
 IPTABLES_SAVE_FILE="/etc/iptables/rent_rules.v4"
 IP6TABLES_SAVE_FILE="/etc/iptables/rent_rules.v6"
@@ -14,38 +13,30 @@ MAX_LOG_SIZE=262144
 
 mkdir -p /etc/rent /etc/iptables
 
-touch "$TRAFFIC_SAVE_FILE" "$IPTABLES_SAVE_FILE" "$IP6TABLES_SAVE_FILE" "$LOG_FILE" "$LOG_FILE_2"
+touch "$TRAFFIC_SAVE_FILE" "$IPTABLES_SAVE_FILE" "$IP6TABLES_SAVE_FILE" "$LOG_FILE"
 
 if [ ! -f "$CONFIG_FILE" ]; then
     cat > "$CONFIG_FILE" << EOF
-# 配置格式1：         单端口         月度流量限制(GiB) 重置日期(1-31)
-# 配置格式2：起始端口-结束端口 月度流量限制(GiB) 重置日期(1-31)
+# 配置格式1：         单端口         月度流量限制(GiB) 重置日期(1-28)
+# 配置格式2：起始端口-结束端口 月度流量限制(GiB) 重置日期(1-28)
 # 例如：
-# 9300 50 1
-# 49364-49365 100 12
+# 9300 50.20 1
+# 49364-49365 100.00 12
 EOF
 fi
 
 clear_log() {
-    local log_file="$1"
-    if [ -f "$log_file" ] && [ "$(stat -c %s "$log_file")" -gt "$MAX_LOG_SIZE" ]; then
-        > "$log_file"
-        echo "日志文件 $log_file 大小超过限制，清空日志文件" >> "$log_file"
+    if [ -f "$LOG_FILE" ] && [ "$(stat -c %s "$LOG_FILE")" -gt "$MAX_LOG_SIZE" ]; then
+        > "$LOG_FILE"
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] 日志文件已自动清空" >> "$LOG_FILE"
     fi
 }
 
 log() {
-    clear_log "$LOG_FILE"
-    clear_log "$LOG_FILE_2"
-
     local timestamp
     timestamp=$(date '+%Y-%m-%d %H:%M:%S')
     echo "[$timestamp] $1" >> "$LOG_FILE"
     echo "$1"
-
-    if [[ "$1" == *"cron"* ]]; then
-        echo "[$timestamp] $1" >> "$LOG_FILE_2"
-    fi
 }
 
 parse_port_range() {
@@ -77,20 +68,19 @@ handle_port_rules() {
     local port_spec=$([[ "${start_port}" -eq "${end_port}" ]] && echo "${start_port}" || echo "${start_port}:${end_port}")
 
     process_rule() {
-        local direction="$1"
+        local chain="$1"
         local ports_flag="$2"
-        local ctdir="$3"
         
         for ipt_cmd in "$IPTABLES_PATH" "$IP6TABLES_PATH"; do
             for proto in tcp udp; do
                 for target in "${target_list[@]}"; do
-                    if "$ipt_cmd" -C PORT_LIMIT -m conntrack --ctdir "${ctdir}" -p "${proto}" --match multiport "${ports_flag}" "${port_spec}" -j "${target}" 2>/dev/null; then
+                    if "$ipt_cmd" -C "$chain" -p "${proto}" --match multiport "${ports_flag}" "${port_spec}" -j "${target}" 2>/dev/null; then
                         if [[ "${action}" = "-D" ]]; then
-                            "$ipt_cmd" -D PORT_LIMIT -m conntrack --ctdir "${ctdir}" -p "${proto}" --match multiport "${ports_flag}" "${port_spec}" -j "${target}"
+                            "$ipt_cmd" -D "$chain" -p "${proto}" --match multiport "${ports_flag}" "${port_spec}" -j "${target}"
                         fi
                     else
                         if [[ "${action}" = "-A" || "${action}" = "-I" ]]; then
-                            "$ipt_cmd" "${action}" PORT_LIMIT -m conntrack --ctdir "${ctdir}" -p "${proto}" --match multiport "${ports_flag}" "${port_spec}" -j "${target}"
+                            "$ipt_cmd" "${action}" "$chain" -p "${proto}" --match multiport "${ports_flag}" "${port_spec}" -j "${target}"
                         fi
                     fi
                 done
@@ -100,18 +90,27 @@ handle_port_rules() {
 
     IFS=',' read -ra target_list <<< "${targets}"
 
-    process_rule "ORIGINAL" "--dports" "ORIGINAL"
-    process_rule "REPLY" "--sports" "REPLY"
+    process_rule "PORT_IN" "--dports"
+    process_rule "PORT_OUT" "--sports"
 }
 
 initialize_iptables() {
     log "初始化端口流量限制服务"
 
     for ipt_cmd in "$IPTABLES_PATH" "$IP6TABLES_PATH"; do
-        if "$ipt_cmd" -L PORT_LIMIT &>/dev/null; then
-            "$ipt_cmd" -F PORT_LIMIT
-        else
-            "$ipt_cmd" -N PORT_LIMIT
+        for chain in PORT_IN PORT_OUT; do
+            if "$ipt_cmd" -L "$chain" &>/dev/null; then
+                "$ipt_cmd" -F "$chain"
+            else
+                "$ipt_cmd" -N "$chain"
+            fi
+        done
+
+        if ! "$ipt_cmd" -C INPUT -j PORT_IN &>/dev/null; then
+            "$ipt_cmd" -I INPUT 1 -j PORT_IN
+        fi
+        if ! "$ipt_cmd" -C OUTPUT -j PORT_OUT &>/dev/null; then
+            "$ipt_cmd" -I OUTPUT 1 -j PORT_OUT
         fi
     done
 
@@ -124,15 +123,6 @@ initialize_iptables() {
             log "无效端口格式: ${port_range}，已跳过" >&2
         fi
     done < "${CONFIG_FILE}"
-
-    for ipt_cmd in "$IPTABLES_PATH" "$IP6TABLES_PATH"; do
-        for chain in INPUT OUTPUT; do
-            if ! "$ipt_cmd" -C "${chain}" -j PORT_LIMIT &>/dev/null; then
-                "$ipt_cmd" -I "${chain}" 1 -j PORT_LIMIT
-                log "已挂载 PORT_LIMIT 到 ${chain} 链 ($([[ "$ipt_cmd" == *"ip6tables" ]] && echo "IPv6" || echo "IPv4"))"
-            fi
-        done
-    done
 
     save_iptables_rules
     log "初始化已完成"
@@ -171,8 +161,10 @@ restore_iptables_rules() {
 save_traffic_usage() {
     local traffic_data=""
     local iptables_data=$({
-        $IPTABLES_PATH -L PORT_LIMIT -nvx 2>/dev/null
-        $IP6TABLES_PATH -L PORT_LIMIT -nvx 2>/dev/null
+        $IPTABLES_PATH -L PORT_IN -nvx 2>/dev/null
+        $IPTABLES_PATH -L PORT_OUT -nvx 2>/dev/null
+        $IP6TABLES_PATH -L PORT_IN -nvx 2>/dev/null
+        $IP6TABLES_PATH -L PORT_OUT -nvx 2>/dev/null
     })
 
     while IFS= read -r line || [[ -n "$line" ]]; do
@@ -209,8 +201,10 @@ convert_scientific_notation() {
 
 check_limits() {
     local iptables_output=$({
-        $IPTABLES_PATH -L PORT_LIMIT -nvx
-        $IP6TABLES_PATH -L PORT_LIMIT -nvx
+        $IPTABLES_PATH -L PORT_IN -nvx
+        $IPTABLES_PATH -L PORT_OUT -nvx
+        $IP6TABLES_PATH -L PORT_IN -nvx
+        $IP6TABLES_PATH -L PORT_OUT -nvx
     })
 
     while read -r port_range limit reset_day; do
@@ -256,12 +250,16 @@ show_stats() {
     echo "当前流量使用情况（包含IPv4/IPv6）："
 
     local iptables_in_out=$({
-        $IPTABLES_PATH -L PORT_LIMIT -nvx
-        $IP6TABLES_PATH -L PORT_LIMIT -nvx
+        $IPTABLES_PATH -L PORT_IN -nvx
+        $IPTABLES_PATH -L PORT_OUT -nvx
+        $IP6TABLES_PATH -L PORT_IN -nvx
+        $IP6TABLES_PATH -L PORT_OUT -nvx
     })
     local port_limit_rules=$({
-        $IPTABLES_PATH -L PORT_LIMIT -n
-        $IP6TABLES_PATH -L PORT_LIMIT -n
+        $IPTABLES_PATH -L PORT_IN -n
+        $IP6TABLES_PATH -L PORT_IN -n
+        $IPTABLES_PATH -L PORT_OUT -n
+        $IP6TABLES_PATH -L PORT_OUT -n
     })
     
     while read -r port_range limit reset_day; do
@@ -342,21 +340,24 @@ save_remaining_limits() {
 }
 
 pause_and_clear() {
-    log "开始清除由脚本添加的iptables规则（IPv4/IPv6）"
+    log "开始清除由脚本添加的iptables规则"
 
     for ipt_cmd in "$IPTABLES_PATH" "$IP6TABLES_PATH"; do
         for chain in INPUT OUTPUT; do
-            if $ipt_cmd -C "$chain" -j PORT_LIMIT &>/dev/null; then
-                $ipt_cmd -D "$chain" -j PORT_LIMIT
-                log "已从 ${chain} 链移除PORT_LIMIT（$([[ "$ipt_cmd" == *"ip6tables" ]] && echo "IPv6" || echo "IPv4")）"
+            if $ipt_cmd -C "$chain" -j PORT_IN &>/dev/null; then
+                $ipt_cmd -D "$chain" -j PORT_IN
+            fi
+            if $ipt_cmd -C "$chain" -j PORT_OUT &>/dev/null; then
+                $ipt_cmd -D "$chain" -j PORT_OUT
             fi
         done
         
-        if $ipt_cmd -L PORT_LIMIT &>/dev/null; then
-            $ipt_cmd -F PORT_LIMIT
-            $ipt_cmd -X PORT_LIMIT
-            log "已清除PORT_LIMIT链（$([[ "$ipt_cmd" == *"ip6tables" ]] && echo "IPv6" || echo "IPv4")）"
-        fi
+        for custom_chain in PORT_IN PORT_OUT; do
+            if $ipt_cmd -L "$custom_chain" &>/dev/null; then
+                $ipt_cmd -F "$custom_chain"
+                $ipt_cmd -X "$custom_chain"
+            fi
+        done
     done
 
     local temp_cron=$(mktemp)
@@ -377,9 +378,9 @@ add_cron_tasks() {
 
     new_cron=$(cat <<EOF
 $filtered_cron
-@reboot /usr/local/bin/rent.sh restart # rent
+@reboot /usr/local/bin/rent.sh recover # rent
 $check_time /usr/local/bin/rent.sh check >> /var/log/rent_cron.log 2>&1 # rent
-$log_time /usr/local/bin/rent.sh log # rent
+$log_time /usr/local/bin/rent.sh clear # rent
 EOF
 )
     echo "$new_cron" | sudo crontab -
@@ -396,8 +397,8 @@ add_re_cron_task() {
     }
 
     validate_day() {
-        [[ "$1" =~ ^[0-9]+$ ]] && (( $1 >= 1 && $1 <= 31 )) || {
-            echo "错误：日期必须在1-31之间，已重置为默认值1"; return 1
+        [[ "$1" =~ ^[0-9]+$ ]] && (( $1 >= 1 && $1 <= 28 )) || {
+            echo "错误：日期必须在1-28之间，已重置为默认值1"; return 1
         }
     }
 
@@ -437,7 +438,7 @@ add_re_cron_task() {
             [[ "$port_range" == "done" ]] && break
             [[ -z "$port_range" ]] && { echo "错误：输入不能为空"; continue; }
             
-            read -r -p "请输入流量重置日期（1-31，默认1）: " day
+            read -r -p "请输入流量重置日期（1-28，默认1）: " day
             add_single_task "$port_range" "$day"
         done
     }
@@ -510,16 +511,16 @@ add_iptables_range() {
     fi
 
     local reset_day="${2}"
+    local regex='^[1-9]$|^1[0-9]$|^2[0-8]$'
+
     if [[ -z "${reset_day}" ]]; then
-        echo "请输入重置日期 (1-31):"
-        until [[ "${reset_day}" =~ ^[1-9]$|^[12][0-9]$|^3[01]$ ]]; do
+        echo "请输入重置日期 (1-28)，无效日期会循环:"
+        until [[ "${reset_day}" =~ ${regex} ]]; do
             read -r reset_day
             [[ -n "${reset_day}" ]] || echo "输入不能为空，请重新输入:"
         done
-    fi
-
-    if ! [[ "${reset_day}" =~ ^[1-9]$|^[12][0-9]$|^3[01]$ ]]; then
-        echo "重置日期无效，请输入一个有效的日期 (1-31)。"
+    elif ! [[ "${reset_day}" =~ ${regex} ]]; then
+        echo "重置日期无效，请输入一个有效的日期 (1-28)"
         return 1
     fi
 
@@ -603,23 +604,65 @@ update_auto() {
     echo "当前版本：$VERSION => 最新版本：$(grep '^VERSION=' "$install_path" | cut -d'"' -f2)"
 }
 
+uninstall_rent() {
+    echo "卸载前请先执行该命令停止服务：sudo rent.sh cancel"
+    echo ""
+
+    read -p "若已执行过上述命令，请输入 Y 确认卸载（其他键取消）: " confirm
+    if [[ "$confirm" != "Y" && "$confirm" != "y" ]]; then
+        echo "卸载已取消"
+        exit 0
+    fi
+
+    echo "开始卸载 Rent-PL 服务..."
+
+    config_files=(
+        "$CONFIG_FILE"
+        "$CP_FILE"
+        "$LOG_FILE"
+        "$TRAFFIC_SAVE_FILE"
+        "$IPTABLES_SAVE_FILE"
+        "$IP6TABLES_SAVE_FILE"
+    )
+    for file in "${config_files[@]}"; do
+        if [ -f "$file" ] && rm -f "$file"; then
+            echo "删除相关文件成功"
+        else
+            echo "相关文件不存在或删除失败"
+        fi
+    done
+
+    if rm -f /usr/local/bin/rent.sh; then
+        echo "已删除脚本文件：/usr/local/bin/rent.sh"
+    else
+        echo "删除脚本文件失败（可能不存在或权限不足）"
+    fi
+}
+
 show_usage() {
     cat <<-EOF
-	用法: sudo rent.sh {init|restart|clear|check|status|log|add|del|reset|update|cron} [参数]
+	用法: sudo rent.sh {命令选项} [参数]
 	
 	命令选项:
-	  init              初始化Rent-PL服务
-	  restart           重启服务并恢复规则
-	  clear             停止服务并清除规则
-	  check             审查流量是否超限
-	  status            显示流量使用情况
-	  log               检查日志文件
-	  add <端口范围> <日期>  添加端口服务
-	  del <端口范围>     删除端口服务
-	  reset <端口范围>   重置端口流量
-	  update             更新脚本
-	  cron               手动添加定时任务
+	  init                     初始化Rent-PL服务
+	  restart                  重启Rent-PL服务
+	  cancel                   终止Rent-PL服务
+	  status                   显示流量使用情况
+	  log                      输出日志
+	  add    <端口范围> <日期> 添加端口
+	  del    <端口范围>        删除端口
+	  reset  <端口范围>        重置端口流量
+	  check                    流量审查
+	  recover                  恢复Rent-PL服务（用于cron）
+	  clear                    清理日志文件
+	  update                   更新脚本
+	  uninstall                卸载脚本
 	EOF
+}
+
+show_logs() {
+    echo "==== 末尾15条日志 ===="
+    tail -n 15 "$LOG_FILE"
 }
 
 case "$1" in
@@ -635,23 +678,20 @@ case "$1" in
         log "重启Rent-PL服务"
         restore_iptables_rules
         save_remaining_limits
+        add_cron_tasks
+        add_re_cron_task
         ;;
-    clear)
-        log "清除Rent-PL服务"
+    cancel)
+        log "终止Rent-PL服务"
         save_traffic_usage
         save_iptables_rules
         pause_and_clear
-        ;;
-    check)
-        check_limits
-        save_traffic_usage
-        save_iptables_rules
         ;;
     status)
         show_stats
         ;;
     log)
-        log "检查日志文件"
+        show_logs
         ;;
     add)
         add_iptables_range "$2" "$3"
@@ -665,12 +705,24 @@ case "$1" in
     reset)
         re_iptables_range "$2"
         ;;
+    check)
+        check_limits
+        save_traffic_usage
+        save_iptables_rules
+        ;;
+    recover)
+        log "恢复Rent-PL服务"
+        restore_iptables_rules
+        save_remaining_limits
+        ;;
+    clear)
+        clear_log
+        ;;
     update)
         update_auto
         ;;
-    cron)
-        add_cron_tasks
-        add_re_cron_task
+    uninstall)
+        uninstall_rent
         ;;
     *)
         show_usage
