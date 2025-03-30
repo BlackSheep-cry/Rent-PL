@@ -1,6 +1,6 @@
 #!/bin/bash
 
-VERSION="V0.5.0"
+VERSION="V0.5.1"
 IPTABLES_PATH="/usr/sbin/iptables"
 IP6TABLES_PATH="/usr/sbin/ip6tables"
 CONFIG_FILE="/etc/rent/config"
@@ -389,6 +389,7 @@ EOF
 
 add_re_cron_task() {
     local current_cron=$(sudo crontab -l 2>/dev/null)
+    local config_file="$CONFIG_FILE"
 
     validate_port_format() {
         [[ "$1" =~ ^[0-9]+(-[0-9]+)?$ ]] || {
@@ -429,18 +430,7 @@ add_re_cron_task() {
         fi
 
         current_cron+=$'\n'"0 0 $day * * /usr/local/bin/rent.sh reset $port_range $tag"
-        echo "信息：端口 $port_range 的定时任务已添加（每月${day}日重置）"
-    }
-
-    interactive_mode() {
-        while :; do
-            read -r -p "请输入要添加的端口（格式：6200 或 49364-49365，输入 done 结束）: " port_range
-            [[ "$port_range" == "done" ]] && break
-            [[ -z "$port_range" ]] && { echo "错误：输入不能为空"; continue; }
-            
-            read -r -p "请输入流量重置日期（1-28，默认1）: " day
-            add_single_task "$port_range" "$day"
-        done
+        echo "信息：端口 $port_range 的定时任务已添加（每月${day}日重置流量）"
     }
 
     parameter_mode() {
@@ -453,8 +443,30 @@ add_re_cron_task() {
         fi
     }
 
+    process_config_file() {
+        if [[ ! -f "$config_file" ]]; then
+            echo "错误：配置文件 $config_file 不存在"
+            return 1
+        fi
+
+        while IFS= read -r line || [[ -n "$line" ]]; do
+            line=$(echo "$line" | sed -e 's/#.*$//' -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
+            [[ -z "$line" ]] && continue
+            
+            local port_range traffic day
+            read -r port_range traffic day <<< "$line"
+            
+            if [[ -z "$port_range" || -z "$day" ]]; then
+                echo "错误：配置文件行格式错误，跳过：$line"
+                continue
+            fi
+
+            add_single_task "$port_range" "$day"
+        done < "$config_file"
+    }
+
     case $# in
-        0) interactive_mode ;;
+        0) process_config_file ;;
         2) parameter_mode "$@" || return $? ;;
         *) parameter_mode "$@" ;;
     esac
@@ -605,7 +617,8 @@ update_auto() {
 }
 
 uninstall_rent() {
-    echo "卸载前请先执行该命令停止服务：sudo rent.sh cancel"
+    echo "卸载前请先执行该命令停止服务："
+    echo "sudo rent.sh cancel"
     echo ""
 
     read -p "若已执行过上述命令，请输入 Y 确认卸载（其他键取消）: " confirm
