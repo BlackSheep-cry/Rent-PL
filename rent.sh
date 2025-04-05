@@ -1,6 +1,6 @@
 #!/bin/bash
 
-VERSION="V0.5.1"
+VERSION="V0.6.0"
 IPTABLES_PATH="/usr/sbin/iptables"
 IP6TABLES_PATH="/usr/sbin/ip6tables"
 CONFIG_FILE="/etc/rent/config"
@@ -41,17 +41,26 @@ log() {
 
 parse_port_range() {
     local range=$1
-    local start_port end_port
+    local parsed_ports=()
 
-    IFS=- read -r start_port end_port <<< "$range"
-    end_port=${end_port:-$start_port}
+    IFS=',' read -ra parts <<< "$range"
+    for part in "${parts[@]}"; do
+        IFS=- read -r start_port end_port <<< "$part"
+        end_port=${end_port:-$start_port}
 
-    if [[ "$start_port" =~ ^[0-9]+$ && "$end_port" =~ ^[0-9]+$ ]] && (( start_port <= end_port )); then
-        echo "$start_port $end_port"
-    else
-        log "错误，端口格式无效"
-        exit 1
-    fi
+        if [[ "$start_port" =~ ^[0-9]+$ && "$end_port" =~ ^[0-9]+$ ]] && (( start_port <= end_port )); then
+            if [[ "$start_port" == "$end_port" ]]; then
+                parsed_ports+=("$start_port")
+            else
+                parsed_ports+=("$start_port:$end_port")
+            fi
+        else
+            log "错误，端口格式无效: $part"
+            exit 1
+        fi
+    done
+
+    echo "${parsed_ports[*]}" | tr ' ' ','
 }
 
 handle_port_rules() {
@@ -59,28 +68,26 @@ handle_port_rules() {
     local port_range="${2}"
     local targets="${3:-DROP}"
 
-    read -r start_port end_port <<< "$(parse_port_range "${port_range}")"
-    if [[ ! "${start_port}" =~ ^[0-9]+$ ]] || [[ ! "${end_port}" =~ ^[0-9]+$ ]] || (( start_port > end_port )); then
+    local port_spec
+    port_spec=$(parse_port_range "${port_range}") || {
         log "PORT_ERROR: ${port_range}" >&2
         return 1
-    fi
-
-    local port_spec=$([[ "${start_port}" -eq "${end_port}" ]] && echo "${start_port}" || echo "${start_port}:${end_port}")
+    }
 
     process_rule() {
         local chain="$1"
         local ports_flag="$2"
-        
+
         for ipt_cmd in "$IPTABLES_PATH" "$IP6TABLES_PATH"; do
             for proto in tcp udp; do
                 for target in "${target_list[@]}"; do
-                    if "$ipt_cmd" -C "$chain" -p "${proto}" --match multiport "${ports_flag}" "${port_spec}" -j "${target}" 2>/dev/null; then
-                        if [[ "${action}" = "-D" ]]; then
-                            "$ipt_cmd" -D "$chain" -p "${proto}" --match multiport "${ports_flag}" "${port_spec}" -j "${target}"
+                    if "$ipt_cmd" -C "$chain" -p "$proto" --match multiport "$ports_flag" "$port_spec" -j "$target" 2>/dev/null; then
+                        if [[ "$action" = "-D" ]]; then
+                            "$ipt_cmd" -D "$chain" -p "$proto" --match multiport "$ports_flag" "$port_spec" -j "$target"
                         fi
                     else
-                        if [[ "${action}" = "-A" || "${action}" = "-I" ]]; then
-                            "$ipt_cmd" "${action}" "$chain" -p "${proto}" --match multiport "${ports_flag}" "${port_spec}" -j "${target}"
+                        if [[ "$action" = "-A" || "$action" = "-I" ]]; then
+                            "$ipt_cmd" "$action" "$chain" -p "$proto" --match multiport "$ports_flag" "$port_spec" -j "$target"
                         fi
                     fi
                 done
@@ -114,15 +121,20 @@ initialize_iptables() {
         fi
     done
 
-    while read -r port_range limit reset_day; do
-        [[ "${port_range}" =~ ^#|^$ ]] && continue
-
-        if handle_port_rules "-A" "${port_range}" "ACCEPT"; then
-            log "已添加端口规则: ${port_range}"
-        else
-            log "无效端口格式: ${port_range}，已跳过" >&2
+    while IFS=$' \t' read -r port_range traffic_limit date _extra || [[ -n "$port_range" ]]; do
+        port_range=${port_range%$'\r'}
+        traffic_limit=${traffic_limit%$'\r'}
+        date=${date%$'\r'}
+        
+        [[ "$port_range" =~ ^[[:space:]]*# || -z "$port_range" ]] && continue
+        
+        if [[ -z "$traffic_limit" || -z "$date" || -n "$_extra" ]]; then
+            log "错误：行格式不正确 - $port_range $traffic_limit $date"
+            continue
         fi
-    done < "${CONFIG_FILE}"
+        
+        handle_port_rules "-A" "$port_range" "ACCEPT"
+    done < <(grep -vE '^[[:space:]]*#' "$CONFIG_FILE")
 
     save_iptables_rules
     log "初始化已完成"
@@ -167,27 +179,27 @@ save_traffic_usage() {
         $IP6TABLES_PATH -L PORT_OUT -nvx 2>/dev/null
     })
 
-    while IFS= read -r line || [[ -n "$line" ]]; do
-        line="${line%%#*}"
-        line=$(tr -s '[:space:]' <<< "$line" | xargs)
-        [ -z "$line" ] && continue
-
-        read -r port_range _ _ <<< "$line"
-
-        local start_port end_port regex_part
-        if [[ "$port_range" =~ - ]]; then
-            read -r start_port end_port <<< "$(parse_port_range "$port_range")"
-            regex_part="$start_port:$end_port|$port_range"
-        else
-            regex_part="$port_range"
+    while IFS=$' \t' read -r port_range _ _ _extra || [[ -n "$port_range" ]]; do
+        port_range=${port_range%$'\r'}
+        
+        [[ "$port_range" =~ ^[[:space:]]*# || -z "$port_range" ]] && continue
+        
+        if [[ -n "$_extra" ]]; then
+            log "忽略无效行: $port_range $_extra"
+            continue
         fi
-
+        
+        regex_part=$(echo "$port_range" | sed 's/,/|/g' | sed 's/-/:/')
+        
         local in_bytes out_bytes
         in_bytes=$(echo "$iptables_data" | grep -E "dports[[:space:]]+($regex_part)\>" | awk '{sum += $2} END {print sum+0}')
         out_bytes=$(echo "$iptables_data" | grep -E "sports[[:space:]]+($regex_part)\>" | awk '{sum += $2} END {print sum+0}')
 
+        in_bytes=${in_bytes:-0}
+        out_bytes=${out_bytes:-0}
+
         traffic_data+="$port_range $in_bytes $out_bytes"$'\n'
-    done < <(grep -v '^[[:space:]]*#' "$CONFIG_FILE")
+    done < <(grep -vE '^[[:space:]]*#|^$' "$CONFIG_FILE")
 
     echo "$traffic_data" > "${TRAFFIC_SAVE_FILE}.tmp" && \
         mv -f "${TRAFFIC_SAVE_FILE}.tmp" "$TRAFFIC_SAVE_FILE"
@@ -207,16 +219,19 @@ check_limits() {
         $IP6TABLES_PATH -L PORT_OUT -nvx
     })
 
-    while read -r port_range limit reset_day; do
-        [[ "$port_range" =~ ^#.*$ || -z "$port_range" ]] && continue
-
-        local start_port end_port regex_part
-        if [[ "$port_range" =~ - ]]; then
-            read -r start_port end_port <<< "$(parse_port_range "$port_range")"
-            regex_part="$start_port:$end_port|$port_range"
-        else
-            regex_part="$port_range"
+    while IFS=$' \t' read -r port_range limit reset_day _extra || [[ -n "$port_range" ]]; do
+        port_range=${port_range%$'\r'}
+        limit=${limit%$'\r'}
+        reset_day=${reset_day%$'\r'}
+        
+        [[ "$port_range" =~ ^[[:space:]]*# || -z "$port_range" ]] && continue
+        
+        if [[ -z "$limit" || -z "$reset_day" || -n "$_extra" ]]; then
+            log "配置错误：行 '$port_range $limit $reset_day' 字段不完整"
+            continue
         fi
+
+        regex_part=$(echo "$port_range" | sed 's/,/|/g' | sed 's/-/:/')
 
         local in_bytes out_bytes total_bytes
         in_bytes=$(echo "$iptables_output" | grep -E "dports[[:space:]]+($regex_part)\>" | awk '{sum += $2} END {print sum+0}')
@@ -234,16 +249,18 @@ check_limits() {
         if (( total_bytes > limit_bytes )); then
             log "端口 $port_range 超出流量限制 ($limit GiB)，添加阻止规则"
 
-            if handle_port_rules "-I" "$port_range" "DROP"; then
-                log "已成功添加 $port_range 的 DROP 规则"
+            if ! iptables -L PORT_IN -n | grep -qE "DROP.*multiport.*($regex_part)"; then
+                if handle_port_rules "-I" "$port_range" "DROP"; then
+                    log "已成功添加 $port_range 的 DROP 规则"
+                else
+                    log "添加 $port_range 的 DROP 规则失败"
+                    continue
+                fi
             else
-                log "添加 $port_range 的 DROP 规则失败"
-                continue
+                log "$port_range 已有 DROP 规则，跳过添加"
             fi
-
-            log "流量超出限制，相应端口服务已暂停"
         fi
-    done < "$CONFIG_FILE"
+    done < <(grep -vE '^[[:space:]]*#|^$' "$CONFIG_FILE")
 }
 
 show_stats() { 
@@ -262,30 +279,34 @@ show_stats() {
         $IP6TABLES_PATH -L PORT_OUT -n
     })
     
-    while read -r port_range limit reset_day; do
-        [[ "$port_range" =~ ^#.*$ || -z "$port_range" ]] && continue
-
-        local port_spec
-        if [[ "$port_range" =~ - ]]; then
-            read -r start_port end_port <<< "$(parse_port_range "$port_range")"
-            port_spec="$start_port:$end_port"
-        else
-            port_spec="$port_range"
+    while IFS=$' \t' read -r port_range limit reset_day _extra || [[ -n "$port_range" ]]; do
+        port_range=${port_range%$'\r'}
+        limit=${limit%$'\r'}
+        reset_day=${reset_day%$'\r'}
+        
+        [[ "$port_range" =~ ^[[:space:]]*# || -z "$port_range" ]] && continue
+        
+        if [[ -z "$limit" || -z "$reset_day" || -n "$_extra" ]]; then
+            echo " [错误] 无效配置行: $port_range $limit $reset_day" >&2
+            continue
         fi
 
+        regex_part=$(echo "$port_range" | sed 's/,/|/g' | sed 's/-/:/')
+
         local in_bytes out_bytes
-        eval $(echo "$iptables_in_out" | grep -E "(dports|sports)[[:space:]]+${port_spec}\\b" | awk '
+        eval $(echo "$iptables_in_out" | grep -E "(dports|sports)[[:space:]]+${regex_part}\\b" | awk '
             /dports/ { in_sum += $2 }
             /sports/ { out_sum += $2 }
-            END { printf "in_bytes=%d out_bytes=%d", in_sum+0, out_sum+0 }'
-        )
+            END { printf "in_bytes=%d out_bytes=%d", in_sum, out_sum }
+        ')
 
         in_bytes=$(convert_scientific_notation "$in_bytes")
         out_bytes=$(convert_scientific_notation "$out_bytes")
         local total_gb=$(printf "%.2f" $(echo "scale=2; ($in_bytes + $out_bytes)/1024/1024/1024" | bc))
 
         local status="正常"
-        if echo "$port_limit_rules" | grep -q "DROP.*multiport sports $port_spec"; then
+        
+        if echo "$port_limit_rules" | grep -qE "DROP.*multiport.*($regex_part)"; then
             status="已暂停"
         fi
 
@@ -295,7 +316,7 @@ show_stats() {
         echo "  重置日期：每月 $reset_day 日"
         echo "  当前状态：$status"
         echo "-------------------"
-    done < "$CONFIG_FILE"
+    done < <(grep -vE '^[[:space:]]*#|^$' "$CONFIG_FILE")
 }
 
 save_remaining_limits() {
@@ -365,7 +386,7 @@ pause_and_clear() {
     sudo crontab "$temp_cron"
     rm -f "$temp_cron"
     
-    echo "iptables规则和cron定时任务已清除."
+    log "iptables规则和cron定时任务已清除."
 }
 
 add_cron_tasks() {
@@ -392,14 +413,16 @@ add_re_cron_task() {
     local config_file="$CONFIG_FILE"
 
     validate_port_format() {
-        [[ "$1" =~ ^[0-9]+(-[0-9]+)?$ ]] || {
-            echo "错误：端口格式无效，应为单个端口（如6200）或范围（如49364-49365）"; return 1
+        [[ "$1" =~ ^([0-9]+(-[0-9]+)?,)*[0-9]+(-[0-9]+)?$ ]] || {
+            echo "错误：端口格式无效，应为端口或范围（如 5201或6001-6010）"
+            return 1
         }
     }
 
     validate_day() {
         [[ "$1" =~ ^[0-9]+$ ]] && (( $1 >= 1 && $1 <= 28 )) || {
-            echo "错误：日期必须在1-28之间，已重置为默认值1"; return 1
+            echo "错误：日期必须在1-28之间，已重置为默认值1"
+            return 1
         }
     }
 
@@ -425,12 +448,12 @@ add_re_cron_task() {
 
         local tag=$(generate_tag "$port_range")
         if is_task_existing "$tag"; then
-            echo "警告：端口 $port_range 的任务已存在，跳过..."
+            echo "警告：端口组 $port_range 的任务已存在，跳过..."
             return 0
         fi
 
-        current_cron+=$'\n'"0 0 $day * * /usr/local/bin/rent.sh reset $port_range $tag"
-        echo "信息：端口 $port_range 的定时任务已添加（每月${day}日重置流量）"
+        current_cron+=$'\n'"0 0 $day * * /usr/local/bin/rent.sh reset \"$port_range\" $tag"
+        echo "信息：端口组 $port_range 的定时任务已添加（每月${day}日重置流量）"
     }
 
     parameter_mode() {
@@ -452,10 +475,10 @@ add_re_cron_task() {
         while IFS= read -r line || [[ -n "$line" ]]; do
             line=$(echo "$line" | sed -e 's/#.*$//' -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
             [[ -z "$line" ]] && continue
-            
+
             local port_range traffic day
             read -r port_range traffic day <<< "$line"
-            
+
             if [[ -z "$port_range" || -z "$day" ]]; then
                 echo "错误：配置文件行格式错误，跳过：$line"
                 continue
@@ -489,15 +512,24 @@ delete_iptables_range() {
     tmp_file=$(mktemp) || { echo "创建临时文件失败"; return 1; }
     tmp_cp_file=$(mktemp) || { echo "创建临时文件失败"; return 1; }
 
-    while read -r port_range limit reset_day; do
+    while IFS=$' \t' read -r port_range limit reset_day _extra || [[ -n "$port_range" ]]; do
+        port_range=${port_range%$'\r'}
+        limit=${limit%$'\r'}
+        reset_day=${reset_day%$'\r'}
+        
         [[ "${port_range}" =~ ^# || -z "${port_range}" ]] && continue
+        
+        if [[ -z "$limit" || -z "$reset_day" || -n "$_extra" ]]; then
+            log "忽略无效行: $port_range $limit $reset_day $_extra"
+            continue
+        fi
 
         if [[ "${port_range}" == "${selected_range}" ]]; then
             handle_port_rules "-D" "${port_range}" "ACCEPT,DROP"
         else
             printf "%s %s %s\n" "${port_range}" "${limit}" "${reset_day}" | tee -a "${tmp_file}" "${tmp_cp_file}" >/dev/null
         fi
-    done < "${CONFIG_FILE}"
+    done < <(grep -vE '^[[:space:]]*#|^$' "${CONFIG_FILE}")
 
     mv "${tmp_file}" "${CONFIG_FILE}" || { echo "配置文件更新失败"; return 1; }
     mv "${tmp_cp_file}" "${CP_FILE}" || { echo "备份文件更新失败"; return 1; }
@@ -549,7 +581,7 @@ add_iptables_range() {
         return 1
     fi
 
-    printf "%s %s %s\n" "${selected_range}" "${limit}" "${reset_day}" \
+    printf "%-20s %-8s %-2s\n" "${selected_range}" "${limit}" "${reset_day}" \
         | tee -a "${CONFIG_FILE}" "${CP_FILE}" >/dev/null
 
     save_iptables_rules
@@ -567,15 +599,24 @@ re_iptables_range() {
 
     local tmp_file=$(mktemp)
     
-    while read -r port_range limit reset_day; do
+    while IFS=$' \t' read -r port_range limit reset_day _extra || [[ -n "$port_range" ]]; do
+        port_range=${port_range%$'\r'}
+        limit=${limit%$'\r'}
+        reset_day=${reset_day%$'\r'}
+        
         [[ "${port_range}" =~ ^#.*$ || -z "${port_range}" ]] && continue
+        
+        if [[ -z "$limit" || -z "$reset_day" || -n "$_extra" ]]; then
+            log "忽略无效行: $port_range $limit $reset_day $_extra"
+            continue
+        fi
 
         if [[ "${port_range}" == "${selected_range}" ]]; then
             handle_port_rules "-D" "${port_range}" "ACCEPT,DROP"
         else
             echo "${port_range} ${limit} ${reset_day}" >> "${tmp_file}"
         fi
-    done < "${CONFIG_FILE}"
+    done < <(grep -vE '^[[:space:]]*#|^$' "${CONFIG_FILE}")
 
     mv "${tmp_file}" "${CONFIG_FILE}"
 
@@ -600,12 +641,6 @@ update_auto() {
 
     if ! wget -qO "$tmp_file" "$script_url"; then
         log "错误：无法下载最新版本脚本"
-        rm -f "$tmp_file"
-        return 1
-    fi
-
-    if ! bash -n "$tmp_file"; then
-        log "错误：下载的脚本语法验证失败"
         rm -f "$tmp_file"
         return 1
     fi
