@@ -1,6 +1,6 @@
 #!/bin/bash
 
-VERSION="V0.6.0"
+VERSION="V0.6.1"
 IPTABLES_PATH="/usr/sbin/iptables"
 IP6TABLES_PATH="/usr/sbin/ip6tables"
 CONFIG_FILE="/etc/rent/config"
@@ -263,29 +263,16 @@ check_limits() {
     done < <(grep -vE '^[[:space:]]*#|^$' "$CONFIG_FILE")
 }
 
-show_stats() { 
+show_stats() {
     echo "当前流量使用情况（包含IPv4/IPv6）："
 
-    local iptables_in_out=$({
-        $IPTABLES_PATH -L PORT_IN -nvx
-        $IPTABLES_PATH -L PORT_OUT -nvx
-        $IP6TABLES_PATH -L PORT_IN -nvx
-        $IP6TABLES_PATH -L PORT_OUT -nvx
-    })
-    local port_limit_rules=$({
-        $IPTABLES_PATH -L PORT_IN -n
-        $IP6TABLES_PATH -L PORT_IN -n
-        $IPTABLES_PATH -L PORT_OUT -n
-        $IP6TABLES_PATH -L PORT_OUT -n
-    })
-    
     while IFS=$' \t' read -r port_range limit reset_day _extra || [[ -n "$port_range" ]]; do
         port_range=${port_range%$'\r'}
         limit=${limit%$'\r'}
         reset_day=${reset_day%$'\r'}
-        
+
         [[ "$port_range" =~ ^[[:space:]]*# || -z "$port_range" ]] && continue
-        
+
         if [[ -z "$limit" || -z "$reset_day" || -n "$_extra" ]]; then
             echo " [错误] 无效配置行: $port_range $limit $reset_day" >&2
             continue
@@ -293,20 +280,29 @@ show_stats() {
 
         regex_part=$(echo "$port_range" | sed 's/,/|/g' | sed 's/-/:/')
 
-        local in_bytes out_bytes
-        eval $(echo "$iptables_in_out" | grep -E "(dports|sports)[[:space:]]+${regex_part}\\b" | awk '
-            /dports/ { in_sum += $2 }
-            /sports/ { out_sum += $2 }
-            END { printf "in_bytes=%d out_bytes=%d", in_sum, out_sum }
-        ')
+        ipv4_in=$( $IPTABLES_PATH -L PORT_IN -nvx | grep -E "(dports)[[:space:]]+${regex_part}\\b" | awk '{sum+=$2} END{print sum}' )
+        ipv4_out=$( $IPTABLES_PATH -L PORT_OUT -nvx | grep -E "(sports)[[:space:]]+${regex_part}\\b" | awk '{sum+=$2} END{print sum}' )
 
-        in_bytes=$(convert_scientific_notation "$in_bytes")
-        out_bytes=$(convert_scientific_notation "$out_bytes")
-        local total_gb=$(printf "%.2f" $(echo "scale=2; ($in_bytes + $out_bytes)/1024/1024/1024" | bc))
+        ipv6_in=$( $IP6TABLES_PATH -L PORT_IN -nvx | grep -E "(dports)[[:space:]]+${regex_part}\\b" | awk '{sum+=$2} END{print sum}' )
+        ipv6_out=$( $IP6TABLES_PATH -L PORT_OUT -nvx | grep -E "(sports)[[:space:]]+${regex_part}\\b" | awk '{sum+=$2} END{print sum}' )
 
-        local status="正常"
-        
-        if echo "$port_limit_rules" | grep -qE "DROP.*multiport.*($regex_part)"; then
+        ipv4_in=${ipv4_in:-0}
+        ipv4_out=${ipv4_out:-0}
+        ipv6_in=${ipv6_in:-0}
+        ipv6_out=${ipv6_out:-0}
+
+        ipv4_in=$(convert_scientific_notation "$ipv4_in")
+        ipv4_out=$(convert_scientific_notation "$ipv4_out")
+        ipv6_in=$(convert_scientific_notation "$ipv6_in")
+        ipv6_out=$(convert_scientific_notation "$ipv6_out")
+
+        total_bytes=$(( ipv4_in + ipv4_out + ipv6_in + ipv6_out ))
+        total_gb=$(printf "%.2f" "$(echo "scale=2; $total_bytes/1024/1024/1024" | bc)")
+
+        ipv4_rules=$($IPTABLES_PATH -L PORT_IN -n)
+        ipv6_rules=$($IP6TABLES_PATH -L PORT_IN -n)
+        status="正常"
+        if echo "$ipv4_rules $ipv6_rules" | grep -qE "DROP.*multiport.*($regex_part)"; then
             status="已暂停"
         fi
 
