@@ -1,6 +1,6 @@
 #!/bin/bash
 
-VERSION="V0.6.2"
+VERSION="V0.6.3"
 IPTABLES_PATH="/usr/sbin/iptables"
 IP6TABLES_PATH="/usr/sbin/ip6tables"
 CONFIG_FILE="/etc/rent/config"
@@ -17,11 +17,12 @@ touch "$TRAFFIC_SAVE_FILE" "$IPTABLES_SAVE_FILE" "$IP6TABLES_SAVE_FILE" "$LOG_FI
 
 if [ ! -f "$CONFIG_FILE" ]; then
     cat > "$CONFIG_FILE" << EOF
-# 配置格式1：         单端口         月度流量限制(GiB) 重置日期(1-28)
-# 配置格式2：起始端口-结束端口 月度流量限制(GiB) 重置日期(1-28)
+# 配置格式：单端口/端口范围/两者的自由组合 月度流量限制(GiB) 重置日期(1-28日)
 # 例如：
-# 9300 50.20 1
-# 49364-49365 100.00 12
+# 6020-6030 100.00 1 # 6020-6030端口 月流量限制100G 每月1号重置流量
+# 443,80 1.5 15
+# 5201,5202-5205 1 20 
+# 7020-7030,7090-7095,7096-8000 10 12
 EOF
 fi
 
@@ -501,6 +502,11 @@ delete_iptables_range() {
         read -r selected_range
     }
 
+    if ! grep -vE '^[[:space:]]*#|^$' "${CONFIG_FILE}" | awk '{print $1}' | grep -Fxq "${selected_range}"; then
+        echo "配置文件中不存在端口 ${selected_range}"
+        return 1
+    fi
+
     log "删除 iptables 规则 (仅针对 ${selected_range})"
 
     local tmp_file tmp_cp_file
@@ -544,9 +550,46 @@ add_iptables_range() {
         read -r selected_range
     fi
 
-    if [[ -f "${CONFIG_FILE}" ]] && grep -q "^${selected_range} " "${CONFIG_FILE}" 2>/dev/null; then
-        echo "错误：端口范围 ${selected_range} 已存在，无法重复添加。"
-        return 1
+    if [[ -f "${CONFIG_FILE}" ]]; then
+        local new_intervals=()
+        IFS=',' read -r -a new_segs <<< "${selected_range}"
+        for seg in "${new_segs[@]}"; do
+            if [[ "$seg" =~ ^([0-9]+)-([0-9]+)$ ]]; then
+                new_intervals+=("${BASH_REMATCH[1]}-${BASH_REMATCH[2]}")
+            elif [[ "$seg" =~ ^[0-9]+$ ]]; then
+                new_intervals+=("$seg-$seg")
+            else
+                echo "错误：无效的端口格式 ${seg}"
+                return 1
+            fi
+        done
+
+        while IFS= read -r line; do
+            [[ "$line" =~ ^[[:space:]]*# || -z "$line" ]] && continue
+            local existing_range
+            existing_range=$(echo "$line" | awk '{print $1}')
+            local existing_intervals=()
+            IFS=',' read -r -a ex_segs <<< "${existing_range}"
+            for seg in "${ex_segs[@]}"; do
+                if [[ "$seg" =~ ^([0-9]+)-([0-9]+)$ ]]; then
+                    existing_intervals+=("${BASH_REMATCH[1]}-${BASH_REMATCH[2]}")
+                elif [[ "$seg" =~ ^[0-9]+$ ]]; then
+                    existing_intervals+=("$seg-$seg")
+                fi
+            done
+            for new_int in "${new_intervals[@]}"; do
+                local new_start=${new_int%-*}
+                local new_end=${new_int#*-}
+                for ex_int in "${existing_intervals[@]}"; do
+                    local ex_start=${ex_int%-*}
+                    local ex_end=${ex_int#*-}
+                    if (( new_start <= ex_end && new_end >= ex_start )); then
+                        echo "错误：端口范围 ${selected_range} 与配置中已存在的端口 ${existing_range} 重叠，无法添加"
+                        return 1
+                    fi
+                done
+            done
+        done < "${CONFIG_FILE}"
     fi
 
     local reset_day="${2}"
@@ -572,12 +615,11 @@ add_iptables_range() {
     log "添加 iptables 规则 (端口范围: ${selected_range})"
 
     if ! handle_port_rules "-A" "${selected_range}" "ACCEPT"; then
-        echo "无效的端口格式: ${selected_range}"
+        echo "添加 ${selected_range} 端口规则失败"
         return 1
     fi
 
-    printf "%-20s %-8s %-2s\n" "${selected_range}" "${limit}" "${reset_day}" \
-        | tee -a "${CONFIG_FILE}" "${CP_FILE}" >/dev/null
+    echo "${selected_range} ${limit} ${reset_day}" | tee -a "${CONFIG_FILE}" "${CP_FILE}" >/dev/null
 
     save_iptables_rules
     add_re_cron_task "${selected_range}" "${reset_day}"
