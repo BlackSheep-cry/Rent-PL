@@ -1,6 +1,6 @@
 #!/bin/bash
 
-VERSION="V0.6.1"
+VERSION="V0.6.2"
 IPTABLES_PATH="/usr/sbin/iptables"
 IP6TABLES_PATH="/usr/sbin/ip6tables"
 CONFIG_FILE="/etc/rent/config"
@@ -9,7 +9,7 @@ LOG_FILE="/var/log/rent.log"
 TRAFFIC_SAVE_FILE="/var/log/rent_usage.dat"
 IPTABLES_SAVE_FILE="/etc/iptables/rent_rules.v4"
 IP6TABLES_SAVE_FILE="/etc/iptables/rent_rules.v6"
-MAX_LOG_SIZE=262144
+MAX_LOG_SIZE=524288
 
 mkdir -p /etc/rent /etc/iptables
 
@@ -248,16 +248,15 @@ check_limits() {
 
         if (( total_bytes > limit_bytes )); then
             log "端口 $port_range 超出流量限制 ($limit GiB)，添加阻止规则"
-
-            if ! iptables -L PORT_IN -n | grep -qE "DROP.*multiport.*($regex_part)"; then
+            if echo "$iptables_output" | grep -qE "DROP.*multiport.*($regex_part)(\>|,)"; then
+                log "$port_range 已有 DROP 规则，跳过添加"
+            else
                 if handle_port_rules "-I" "$port_range" "DROP"; then
                     log "已成功添加 $port_range 的 DROP 规则"
                 else
                     log "添加 $port_range 的 DROP 规则失败"
                     continue
                 fi
-            else
-                log "$port_range 已有 DROP 规则，跳过添加"
             fi
         fi
     done < <(grep -vE '^[[:space:]]*#|^$' "$CONFIG_FILE")
@@ -396,7 +395,7 @@ add_cron_tasks() {
     new_cron=$(cat <<EOF
 $filtered_cron
 @reboot /usr/local/bin/rent.sh recover # rent
-$check_time /usr/local/bin/rent.sh check >> /var/log/rent_cron.log 2>&1 # rent
+$check_time /usr/local/bin/rent.sh check # rent
 $log_time /usr/local/bin/rent.sh clear # rent
 EOF
 )
