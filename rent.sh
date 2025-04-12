@@ -1,6 +1,7 @@
 #!/bin/bash
 
-VERSION="V0.6.3"
+VERSION="V0.7.0"
+MAX_LOG_SIZE=524288
 IPTABLES_PATH="/usr/sbin/iptables"
 IP6TABLES_PATH="/usr/sbin/ip6tables"
 CONFIG_FILE="/etc/rent/config"
@@ -9,11 +10,15 @@ LOG_FILE="/var/log/rent.log"
 TRAFFIC_SAVE_FILE="/var/log/rent_usage.dat"
 IPTABLES_SAVE_FILE="/etc/iptables/rent_rules.v4"
 IP6TABLES_SAVE_FILE="/etc/iptables/rent_rules.v6"
-MAX_LOG_SIZE=524288
+HTML_FILE="/var/www/index.html"
+WEB_PORT_FILE="/etc/rent/port.conf"
+WEB_PID_FILE="/var/run/rent_web.pid"
+WEB_LOG="/tmp/web_service.log"
+PASSWORD_FILE="/etc/rent/web_pass"
 
-mkdir -p /etc/rent /etc/iptables
+mkdir -p /etc/rent /etc/iptables /var/www
 
-touch "$TRAFFIC_SAVE_FILE" "$IPTABLES_SAVE_FILE" "$IP6TABLES_SAVE_FILE" "$LOG_FILE"
+touch "$TRAFFIC_SAVE_FILE" "$IPTABLES_SAVE_FILE" "$IP6TABLES_SAVE_FILE" "$LOG_FILE" "$WEB_PORT_FILE" "$HTML_FILE"
 
 if [ ! -f "$CONFIG_FILE" ]; then
     cat > "$CONFIG_FILE" << EOF
@@ -30,6 +35,11 @@ clear_log() {
     if [ -f "$LOG_FILE" ] && [ "$(stat -c %s "$LOG_FILE")" -gt "$MAX_LOG_SIZE" ]; then
         > "$LOG_FILE"
         echo "[$(date '+%Y-%m-%d %H:%M:%S')] 日志文件已自动清空" >> "$LOG_FILE"
+    fi
+
+    if [ -f "$WEB_LOG" ] && [ "$(stat -c %s "$WEB_LOG")" -gt "$MAX_LOG_SIZE" ]; then
+        > "$WEB_LOG"
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] Web服务日志已自动清空" >> "$WEB_LOG"
     fi
 }
 
@@ -657,12 +667,24 @@ re_iptables_range() {
 
     mv "${tmp_file}" "${CONFIG_FILE}"
 
-    local matched_rule=$(awk -v sr="${selected_range}" '$1 == sr {print $0; exit}' "${CP_FILE}")
-    if [[ -n "${matched_rule}" ]]; then
-        read -r matched_port matched_limit matched_day <<< "${matched_rule}"
-        handle_port_rules "-A" "${matched_port}" "ACCEPT"
-        echo "${matched_rule}" >> "${CONFIG_FILE}"
+    local cp_tmp=$(mktemp)
+    local cp_matched_rule=""
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        line=${line%$'\r'}
+        port_range=$(awk '{print $1}' <<< "$line")
+        if [[ "$port_range" == "$selected_range" ]]; then
+            cp_matched_rule="$line"
+        else
+            echo "$line" >> "$cp_tmp"
+        fi
+    done < "${CP_FILE}"
+    if [[ -n "$cp_matched_rule" ]]; then
+        mv "$cp_tmp" "${CP_FILE}"
+        echo "$cp_matched_rule" | tee -a "${CP_FILE}" "${CONFIG_FILE}" >/dev/null
+        read -r matched_port matched_limit matched_day <<< "$cp_matched_rule"
+        handle_port_rules "-A" "$matched_port" "ACCEPT"
     else
+        rm "$cp_tmp"
         echo "未找到与端口范围 ${selected_range} 匹配的备份规则."
     fi
 
@@ -708,6 +730,11 @@ uninstall_rent() {
         "$TRAFFIC_SAVE_FILE"
         "$IPTABLES_SAVE_FILE"
         "$IP6TABLES_SAVE_FILE"
+        "$WEB_PORT_FILE"
+        "$HTML_FILE"
+        "$WEB_PID_FILE"
+        "$PASSWORD_FILE"
+        "$WEB_LOG"
     )
     for file in "${config_files[@]}"; do
         if [ -f "$file" ] && rm -f "$file"; then
@@ -733,6 +760,7 @@ show_usage() {
 	  restart                  重启Rent-PL服务
 	  cancel                   终止Rent-PL服务
 	  status                   显示流量使用情况
+	  web    <第二参数>        管理网页服务
 	  log                      输出日志
 	  add    <端口范围> <日期> 添加端口
 	  del    <端口范围>        删除端口
@@ -750,6 +778,338 @@ show_logs() {
     tail -n 15 "$LOG_FILE"
 }
 
+generate_html() {
+    local HTML_TMP_FILE="/tmp/index.tmp"
+    local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
+    
+    cat > "$HTML_TMP_FILE" <<EOF
+<!DOCTYPE html>
+<html lang='zh'>
+<head>
+    <meta charset='UTF-8'>
+    <title>流量统计 - Rent-PL</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 20px; background: #f5f5f5; }
+        .container { max-width: 800px; margin: 0 auto; background: white; padding: 20px; border-radius: 8px; box-shadow: 0 0 15px rgba(0,0,0,0.2); }
+        h1 { color: #2c3e50; text-align: center; font-size: 28px; text-shadow: 2px 2px 4px rgba(0,0,0,0.1); }
+        .stats { margin: 20px 0; }
+        .stat-item { padding: 10px; border-bottom: 1px solid #eee; }
+        .stat-item h3 { color: #34495e; font-size: 18px; margin-bottom: 8px; }
+        .stat-item p { color: #666; margin: 8px 0; }
+        .remaining { color: #1E90FF; font-weight: bold; }
+        .limit { color: #FFA500; font-weight: bold; }
+        .reset-day { color: #27ae60; }
+        .progress { 
+            height: 25px;
+            background: #e0e0e0;
+            border-radius: 12px;
+            overflow: hidden; 
+            border: 1px solid #ddd;
+            position: relative;
+            width: 100%;
+        }
+        .progress-bar { 
+            height: 100%; 
+            transition: width 0.3s;
+        }
+        .progress-percent {
+            position: absolute;
+            left: 50%;
+            top: 50%;
+            transform: translate(-50%, -50%);
+            color: white;
+            font-weight: bold;
+            text-shadow: 1px 1px 2px rgba(0,0,0,0.3);
+            font-size: 14px;
+            z-index: 2;
+            white-space: nowrap;
+        }
+        .status-active { color: #00c853; }
+        .status-paused { color: #d50000; }
+        .update-time { text-align: center; color: #888; margin-top: 20px; font-size: 0.9em; }
+    </style>
+</head>
+<body>
+    <div class='container'>
+        <h1>Rent-PL</h1>
+        <div class='stats'>
+EOF
+
+    while IFS=$' \t' read -r port_range limit reset_day _extra <&3 &&
+          IFS=$' \t' read -r cp_port_range cp_limit cp_reset_day _cp_extra <&4; do
+        port_range=${port_range%$'\r'}
+        limit=${limit%$'\r'}
+        reset_day=${reset_day%$'\r'}
+        cp_limit=${cp_limit%$'\r'}
+
+        [[ "$port_range" =~ ^[[:space:]]*# || -z "$port_range" ]] && continue
+        [[ -z "$limit" || -z "$reset_day" || -n "$_extra" ]] && continue
+
+        regex_part=$(echo "$port_range" | sed 's/,/|/g; s/-/:/g')
+
+        ipv4_in=$($IPTABLES_PATH -L PORT_IN -nvx 2>/dev/null | grep -E "dports.*($regex_part)\\b" | awk '{sum+=$2} END{print sum+0}')
+        ipv4_out=$($IPTABLES_PATH -L PORT_OUT -nvx 2>/dev/null | grep -E "sports.*($regex_part)\\b" | awk '{sum+=$2} END{print sum+0}')
+        ipv6_in=$($IP6TABLES_PATH -L PORT_IN -nvx 2>/dev/null | grep -E "dports.*($regex_part)\\b" | awk '{sum+=$2} END{print sum+0}')
+        ipv6_out=$($IP6TABLES_PATH -L PORT_OUT -nvx 2>/dev/null | grep -E "sports.*($regex_part)\\b" | awk '{sum+=$2} END{print sum+0}')
+
+        total_bytes=$(($(convert_scientific_notation "$ipv4_in") + \
+                      $(convert_scientific_notation "$ipv4_out") + \
+                      $(convert_scientific_notation "$ipv6_in") + \
+                      $(convert_scientific_notation "$ipv6_out")))
+
+        used_gb=$(awk "BEGIN { printf \"%.2f\", $total_bytes / 1073741824 }")
+        limit_gb=$(awk "BEGIN { printf \"%.2f\", $limit }")
+        remaining_gb=$(awk "BEGIN { r = $limit_gb - $used_gb; printf \"%.2f\", r < 0 ? 0 : r }")
+        limit_gb_display=$(awk "BEGIN { printf \"%.2f\", $cp_limit }")
+
+        if $IPTABLES_PATH -L PORT_IN -n 2>/dev/null | grep -qE "DROP.*($regex_part)" ||
+           $IP6TABLES_PATH -L PORT_IN -n 2>/dev/null | grep -qE "DROP.*($regex_part)"; then
+            status="已暂停"
+            status_class="status-paused"
+        else
+            status="正常"
+            status_class="status-active"
+        fi
+
+        if [[ "$cp_limit" =~ ^[0-9.]+$ ]] && (( $(echo "$cp_limit > 0" | bc -l) )); then
+            progress=$(awk "BEGIN { p = ($remaining_gb / $cp_limit) * 100; p = (p < 0 ? 0 : p); printf \"%.0f\", p }")
+            if (( progress > 0 && progress < 5 )); then progress=5; fi
+            (( progress > 100 )) && progress=100
+        else
+            progress=0
+        fi
+
+        if [[ $progress -ge 70 ]]; then
+            bar_color="#4CAF50"
+        elif [[ $progress -ge 30 ]]; then
+            bar_color="#ffa500"
+        else
+            bar_color="#ff4444"
+        fi
+
+        cat <<EOF >> "$HTML_TMP_FILE"
+            <div class="stat-item">
+                <h3>端口范围: ${port_range}</h3>
+                <p>剩余流量: <span class="remaining">${remaining_gb}</span> GiB / 限额: <span class="limit">${limit_gb_display}</span> GiB</p>
+                <div class="progress">
+                    <div class="progress-bar" style="width: ${progress}%; background-color: ${bar_color};"></div>
+                    <span class="progress-percent">${progress}%</span>
+                </div>
+                <p>重置日期: 每月 <span class="reset-day">${reset_day}</span> 日 | 状态: <span class="${status_class}">${status}</span></p>
+            </div>
+EOF
+    done 3< <(grep -vE '^[[:space:]]*#|^$' "$CONFIG_FILE") 4< <(grep -vE '^[[:space:]]*#|^$' "$CP_FILE")
+
+    cat >> "$HTML_TMP_FILE" <<EOF
+        </div>
+        <div class="update-time">最后更新: ${timestamp}</div>
+    </div>
+</body>
+</html>
+EOF
+
+    if mv -f "$HTML_TMP_FILE" "$HTML_FILE"; then
+        log "HTML文件已更新"
+    else
+        log "HTML文件更新失败"
+        return 1
+    fi
+}
+
+web_server() {
+    local port=${1:-8080}
+    generate_html
+
+    if [ ! -f "$PASSWORD_FILE" ]; then
+        log "未检测到密码文件，请先设置访问密码"
+        init_password || return 1
+    fi
+
+    stored_pass=$(awk -F: '/^rent:/{print $2}' "$PASSWORD_FILE")
+    export STORED_PASS="$stored_pass"
+
+    python3 -c "
+# -*- coding: utf-8 -*-
+from http.server import HTTPServer, BaseHTTPRequestHandler
+from base64 import b64decode
+import subprocess
+import time
+import os
+import traceback
+
+class DynamicAuthHandler(BaseHTTPRequestHandler):
+    last_update = 0
+    cached_html = None
+    
+    def do_GET(self):
+        try:
+            print(f'\n收到请求: {self.path}')
+            auth = self.headers.get('Authorization', '')
+            if not auth.startswith('Basic '):
+                self.send_auth_challenge()
+                return
+            
+            try:
+                creds = b64decode(auth.split(' ')[1]).decode('utf-8')
+                username, password = creds.split(':', 1)
+            except Exception as auth_error:
+                print(f'认证解析失败: {auth_error}')
+                self.send_auth_challenge()
+                return
+            
+            stored_pass = os.environ.get('STORED_PASS', '')
+            if username != 'rent' or password != stored_pass:
+                print('密码验证失败')
+                self.send_auth_challenge()
+                return
+
+            current_time = time.time()
+            if current_time - self.last_update > 1:
+                self.update_html()
+                self.last_update = current_time
+
+            if not self.cached_html:
+                self.send_error(503, 'Service Unavailable')
+                return
+                
+            self.send_response(200)
+            self.send_header('Content-type', 'text/html; charset=utf-8')
+            self.send_header('Content-Length', str(len(self.cached_html)))
+            self.end_headers()
+            self.wfile.write(self.cached_html)
+            
+        except Exception as e:
+            print(f'处理请求异常: {traceback.format_exc()}')
+            self.send_error(503, 'Internal Server Error')
+
+    def update_html(self):
+        try:
+            print('正在生成HTML文件...')
+            subprocess.check_call(
+                ['/usr/local/bin/rent.sh', 'generate_html'],
+                stderr=subprocess.STDOUT
+            )
+            with open('/var/www/index.html', 'rb') as f:
+                self.cached_html = f.read()
+            print('HTML更新成功')
+        except Exception as e:
+            print(f'生成HTML失败: {str(e)}')
+            self.cached_html = '<h1>系统维护中</h1>'.encode('utf-8')
+
+    def send_auth_challenge(self):
+        self.send_response(401)
+        realm = 'Rent流量监控'.encode('utf-8').decode('latin-1', errors='replace')
+        self.send_header('WWW-Authenticate', f'Basic realm="{realm}"')
+        self.end_headers()
+        self.wfile.write('401 - 需要身份验证'.encode('utf-8'))
+
+    def log_message(self, format, *args):
+        pass
+
+    def log_error(self, format, *args):
+        message = format % args
+        print(f'服务端错误: {message}')
+
+print(f'启动服务，端口：$port')
+server = HTTPServer(('0.0.0.0', $port), DynamicAuthHandler)
+try:
+    server.serve_forever()
+except KeyboardInterrupt:
+    print('服务正常终止')
+    server.server_close()
+" > "$WEB_LOG" 2>&1 &
+
+    local pid=$!
+    echo $pid > "$WEB_PID_FILE"
+    echo "服务已启动(PID: $pid)"
+}
+
+manage_web_service() {
+    case $1 in
+        start)
+            if [ -f "$WEB_PID_FILE" ]; then
+                pid=$(cat "$WEB_PID_FILE")
+                if ps -p $pid > /dev/null; then
+                    echo "Web服务已在运行中 (PID: $pid)"
+                    return 1
+                fi
+            fi
+            local port=$(get_web_port)
+            log "正在启动Web服务，端口：$port"
+            web_server $port
+            ;;
+        stop)
+            log "正在停止Web服务..."
+            if [ -f "$WEB_PID_FILE" ]; then
+                main_pid=$(head -n1 "$WEB_PID_FILE")
+                if ps -p $main_pid >/dev/null; then
+                    pgid=$(ps -o pgid= $main_pid | tr -d ' ')
+                    kill -TERM -- -$pgid 2>/dev/null
+                    sleep 0.5
+                    kill -KILL -- -$pgid 2>/dev/null
+                fi
+            fi
+            pkill -f "python3 -m http.server.*$(get_web_port)"
+            rm -f "$WEB_PID_FILE"
+            log "Web服务已停止"
+            ;;
+        port)
+            read -p "请输入新的Web端口 (默认: 8080): " new_port
+            new_port=${new_port:-8080}
+            if [[ ! "$new_port" =~ ^[0-9]+$ ]] || (( new_port < 1 || new_port > 65535 )); then
+                log "错误：端口号无效"
+                return 1
+            fi
+            echo "$new_port" > "$WEB_PORT_FILE"
+            manage_web_service stop
+            manage_web_service start
+            ;;
+        password)
+            change_password
+            manage_web_service stop
+            manage_web_service start
+            ;;
+        *)
+            echo "用法: sudo rent.sh web {start|stop|port|password}"
+            ;;
+    esac
+}
+
+get_web_port() {
+    if [ -f "$WEB_PORT_FILE" ] && [[ $(cat "$WEB_PORT_FILE") =~ ^[0-9]+$ ]]; then
+        cat "$WEB_PORT_FILE"
+    else
+        echo "8080"
+    fi
+}
+
+init_password() {
+    read -p "设置 rent 用户密码: " password
+    echo "rent:$password" > "$PASSWORD_FILE"
+    chmod 600 "$PASSWORD_FILE"
+    log "密码设置成功 (用户名固定为rent)"
+}
+
+change_password() {
+    if [ ! -f "$PASSWORD_FILE" ]; then
+        log "首次使用请设置密码"
+        init_password
+        return $?
+    fi
+
+    read -p "输入旧密码: " old_pass
+    stored_pass=$(awk -F: '/^rent:/{print $2}' "$PASSWORD_FILE")
+    
+    if [ "$old_pass" != "$stored_pass" ]; then
+        log "旧密码验证失败"
+        return 1
+    fi
+    
+    read -p "输入新密码: " new_pass
+    echo "rent:$new_pass" > "$PASSWORD_FILE"
+    log "密码已更新"
+}
+
 case "$1" in
     init)
         log "初始化Rent-PL服务"
@@ -758,22 +1118,28 @@ case "$1" in
         > "$TRAFFIC_SAVE_FILE"
         add_cron_tasks
         add_re_cron_task
+        manage_web_service start
         ;;
     restart)
-        log "重启Rent-PL服务"
+        log "重启Rent-PL服务 (请先使用cancel)"
         restore_iptables_rules
         save_remaining_limits
         add_cron_tasks
         add_re_cron_task
+        manage_web_service start
         ;;
     cancel)
         log "终止Rent-PL服务"
         save_traffic_usage
         save_iptables_rules
         pause_and_clear
+        manage_web_service stop
         ;;
     status)
         show_stats
+        ;;
+    web)
+        manage_web_service "$2"
         ;;
     log)
         show_logs
@@ -799,6 +1165,7 @@ case "$1" in
         log "恢复Rent-PL服务"
         restore_iptables_rules
         save_remaining_limits
+        manage_web_service start
         ;;
     clear)
         clear_log
@@ -808,6 +1175,9 @@ case "$1" in
         ;;
     uninstall)
         uninstall_rent
+        ;;
+    generate_html)
+        generate_html
         ;;
     *)
         show_usage
