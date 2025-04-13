@@ -774,7 +774,9 @@ show_usage() {
 }
 
 show_logs() {
-    echo "==== 末尾15条日志 ===="
+    echo "==== WEB日志 ===="
+    tail -n 15 "$WEB_LOG"
+    echo "==== 主日志 ===="
     tail -n 15 "$LOG_FILE"
 }
 
@@ -1042,6 +1044,7 @@ class DynamicAuthHandler(BaseHTTPRequestHandler):
         message = format % args
         print(f'服务端错误: {message}')
 
+print(f'启动服务，端口：$port')
 server = HTTPServer(('0.0.0.0', $port), DynamicAuthHandler)
 try:
     server.serve_forever()
