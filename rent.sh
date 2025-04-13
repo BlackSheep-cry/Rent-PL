@@ -1,6 +1,6 @@
 #!/bin/bash
 
-VERSION="V0.7.0"
+VERSION="V0.7.1"
 MAX_LOG_SIZE=524288
 IPTABLES_PATH="/usr/sbin/iptables"
 IP6TABLES_PATH="/usr/sbin/ip6tables"
@@ -766,7 +766,7 @@ show_usage() {
 	  del    <端口范围>        删除端口
 	  reset  <端口范围>        重置端口流量
 	  check                    流量审查
-	  recover                  恢复Rent-PL服务（用于cron）
+	  recover                  恢复Rent-PL服务 (用于cron)
 	  clear                    清理日志文件
 	  update                   更新脚本
 	  uninstall                卸载脚本
@@ -787,14 +787,38 @@ generate_html() {
 <html lang='zh'>
 <head>
     <meta charset='UTF-8'>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>流量统计 - Rent-PL</title>
     <style>
-        body { font-family: Arial, sans-serif; margin: 20px; background: #f5f5f5; }
-        .container { max-width: 800px; margin: 0 auto; background: white; padding: 20px; border-radius: 8px; box-shadow: 0 0 15px rgba(0,0,0,0.2); }
-        h1 { color: #2c3e50; text-align: center; font-size: 28px; text-shadow: 2px 2px 4px rgba(0,0,0,0.1); }
+        body { 
+            font-family: Arial, sans-serif; 
+            margin: 20px; 
+            background: #f5f5f5; 
+        }
+        .container { 
+            max-width: 800px; 
+            margin: 0 auto; 
+            background: white; 
+            padding: 20px; 
+            border-radius: 8px; 
+            box-shadow: 0 0 15px rgba(0,0,0,0.2);
+        }
+        h1 { 
+            color: #2c3e50; 
+            text-align: center; 
+            font-size: 28px; 
+            text-shadow: 2px 2px 4px rgba(0,0,0,0.1);
+        }
         .stats { margin: 20px 0; }
-        .stat-item { padding: 10px; border-bottom: 1px solid #eee; }
-        .stat-item h3 { color: #34495e; font-size: 18px; margin-bottom: 8px; }
+        .stat-item { 
+            padding: 10px; 
+            border-bottom: 1px solid #eee;
+        }
+        .stat-item h3 { 
+            color: #34495e; 
+            font-size: 18px; 
+            margin-bottom: 8px;
+        }
         .stat-item p { color: #666; margin: 8px 0; }
         .remaining { color: #1E90FF; font-weight: bold; }
         .limit { color: #FFA500; font-weight: bold; }
@@ -827,6 +851,15 @@ generate_html() {
         .status-active { color: #00c853; }
         .status-paused { color: #d50000; }
         .update-time { text-align: center; color: #888; margin-top: 20px; font-size: 0.9em; }
+
+        @media screen and (max-width: 600px) {
+            body { margin: 10px; }
+            .container { padding: 15px; }
+            h1 { font-size: 24px; }
+            .stat-item { padding: 8px; }
+            .stat-item h3 { font-size: 16px; }
+            .progress-percent { font-size: 12px; }
+        }
     </style>
 </head>
 <body>
@@ -889,7 +922,7 @@ EOF
 
         cat <<EOF >> "$HTML_TMP_FILE"
             <div class="stat-item">
-                <h3>端口范围: ${port_range}</h3>
+                <h3>端口: ${port_range}</h3>
                 <p>剩余流量: <span class="remaining">${remaining_gb}</span> GiB / 限额: <span class="limit">${limit_gb_display}</span> GiB</p>
                 <div class="progress">
                     <div class="progress-bar" style="width: ${progress}%; background-color: ${bar_color};"></div>
@@ -908,12 +941,7 @@ EOF
 </html>
 EOF
 
-    if mv -f "$HTML_TMP_FILE" "$HTML_FILE"; then
-        log "HTML文件已更新"
-    else
-        log "HTML文件更新失败"
-        return 1
-    fi
+    mv -f "$HTML_TMP_FILE" "$HTML_FILE"
 }
 
 web_server() {
@@ -928,8 +956,7 @@ web_server() {
     stored_pass=$(awk -F: '/^rent:/{print $2}' "$PASSWORD_FILE")
     export STORED_PASS="$stored_pass"
 
-    python3 -c "
-# -*- coding: utf-8 -*-
+    python3 -u -c "
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from base64 import b64decode
 import subprocess
@@ -943,7 +970,12 @@ class DynamicAuthHandler(BaseHTTPRequestHandler):
     
     def do_GET(self):
         try:
-            print(f'\n收到请求: {self.path}')
+            if self.path == '/favicon.ico':
+                self.send_response(404)
+                self.end_headers()
+                return
+
+            print(f'收到请求: {self.path}')
             auth = self.headers.get('Authorization', '')
             if not auth.startswith('Basic '):
                 self.send_auth_challenge()
@@ -964,19 +996,19 @@ class DynamicAuthHandler(BaseHTTPRequestHandler):
                 return
 
             current_time = time.time()
-            if current_time - self.last_update > 1:
+            if current_time - DynamicAuthHandler.last_update > 3:
                 self.update_html()
-                self.last_update = current_time
+                DynamicAuthHandler.last_update = current_time
 
-            if not self.cached_html:
+            if not DynamicAuthHandler.cached_html:
                 self.send_error(503, 'Service Unavailable')
                 return
                 
             self.send_response(200)
             self.send_header('Content-type', 'text/html; charset=utf-8')
-            self.send_header('Content-Length', str(len(self.cached_html)))
+            self.send_header('Content-Length', str(len(DynamicAuthHandler.cached_html)))
             self.end_headers()
-            self.wfile.write(self.cached_html)
+            self.wfile.write(DynamicAuthHandler.cached_html)
             
         except Exception as e:
             print(f'处理请求异常: {traceback.format_exc()}')
@@ -990,16 +1022,16 @@ class DynamicAuthHandler(BaseHTTPRequestHandler):
                 stderr=subprocess.STDOUT
             )
             with open('/var/www/index.html', 'rb') as f:
-                self.cached_html = f.read()
+                DynamicAuthHandler.cached_html = f.read()
             print('HTML更新成功')
         except Exception as e:
             print(f'生成HTML失败: {str(e)}')
-            self.cached_html = '<h1>系统维护中</h1>'.encode('utf-8')
+            DynamicAuthHandler.cached_html = '<h1>系统维护中</h1>'.encode('utf-8')
 
     def send_auth_challenge(self):
         self.send_response(401)
         realm = 'Rent流量监控'.encode('utf-8').decode('latin-1', errors='replace')
-        self.send_header('WWW-Authenticate', f'Basic realm="{realm}"')
+        self.send_header('WWW-Authenticate', f'Basic realm=\"{realm}\"')
         self.end_headers()
         self.wfile.write('401 - 需要身份验证'.encode('utf-8'))
 
@@ -1010,7 +1042,6 @@ class DynamicAuthHandler(BaseHTTPRequestHandler):
         message = format % args
         print(f'服务端错误: {message}')
 
-print(f'启动服务，端口：$port')
 server = HTTPServer(('0.0.0.0', $port), DynamicAuthHandler)
 try:
     server.serve_forever()
