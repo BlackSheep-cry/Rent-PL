@@ -1,6 +1,6 @@
 #!/bin/bash
 
-VERSION="V0.7.1"
+VERSION="V0.7.2"
 MAX_LOG_SIZE=524288
 IPTABLES_PATH="/usr/sbin/iptables"
 IP6TABLES_PATH="/usr/sbin/ip6tables"
@@ -965,21 +965,50 @@ import subprocess
 import time
 import os
 import traceback
+import hmac
+from collections import defaultdict
+
+RATE_LIMIT = 10
+request_timestamps = defaultdict(list)
 
 class DynamicAuthHandler(BaseHTTPRequestHandler):
     last_update = 0
     cached_html = None
-    
-    def do_GET(self):
+
+    def do_HEAD(self):
+        self.do_GET(include_body=False)
+
+    def do_GET(self, include_body=True):
         try:
+            client_ip = self.client_address[0]
+            now = time.time()
+
+            requests = [t for t in request_timestamps[client_ip] if now - t < 60]
+            if len(requests) >= RATE_LIMIT:
+                self.send_error(429, 'Too Many Requests')
+                print(f'[{time.strftime(\"%Y-%m-%d %H:%M:%S\")}] 频率限制触发 IP: {client_ip}')
+                return
+            request_timestamps[client_ip].append(now)
+
+            if not self.requestline.startswith(('GET ', 'HEAD ')):
+                self.send_error(400, 'Bad Request')
+                print(f'[{time.strftime(\"%Y-%m-%d %H:%M:%S\")}] 非法协议请求来自IP: {client_ip}')
+                return
+
+            if self.path not in ['/', '/favicon.ico']:
+                self.send_error(404)
+                print(f'[{time.strftime(\"%Y-%m-%d %H:%M:%S\")}] 拦截非法路径: {self.path} 来自IP: {client_ip}')
+                return
+
             if self.path == '/favicon.ico':
                 self.send_response(404)
                 self.end_headers()
                 return
 
-            print(f'收到请求: {self.path}')
+            print(f'[{time.strftime(\"%Y-%m-%d %H:%M:%S\")}] 收到请求: {self.path}')
             auth = self.headers.get('Authorization', '')
             if not auth.startswith('Basic '):
+                print(f'[{time.strftime(\"%Y-%m-%d %H:%M:%S\")}] 未认证请求来自IP: {client_ip}')
                 self.send_auth_challenge()
                 return
             
@@ -987,13 +1016,13 @@ class DynamicAuthHandler(BaseHTTPRequestHandler):
                 creds = b64decode(auth.split(' ')[1]).decode('utf-8')
                 username, password = creds.split(':', 1)
             except Exception as auth_error:
-                print(f'认证解析失败: {auth_error}')
+                print(f'[{time.strftime(\"%Y-%m-%d %H:%M:%S\")}] 认证解析失败: {auth_error} 来自IP: {client_ip}')
                 self.send_auth_challenge()
                 return
             
             stored_pass = os.environ.get('STORED_PASS', '')
-            if username != 'rent' or password != stored_pass:
-                print('密码验证失败')
+            if not (hmac.compare_digest(username, 'rent') and hmac.compare_digest(password, stored_pass)):
+                print(f'[{time.strftime(\"%Y-%m-%d %H:%M:%S\")}] 密码验证失败 来自IP: {client_ip}')
                 self.send_auth_challenge()
                 return
 
@@ -1010,24 +1039,25 @@ class DynamicAuthHandler(BaseHTTPRequestHandler):
             self.send_header('Content-type', 'text/html; charset=utf-8')
             self.send_header('Content-Length', str(len(DynamicAuthHandler.cached_html)))
             self.end_headers()
-            self.wfile.write(DynamicAuthHandler.cached_html)
+            if include_body:
+                self.wfile.write(DynamicAuthHandler.cached_html)
             
         except Exception as e:
-            print(f'处理请求异常: {traceback.format_exc()}')
+            print(f'[{time.strftime(\"%Y-%m-%d %H:%M:%S\")}] 处理请求异常({self.client_address[0]}): {traceback.format_exc()}')
             self.send_error(503, 'Internal Server Error')
 
     def update_html(self):
         try:
-            print('正在生成HTML文件...')
+            print(f'[{time.strftime(\"%Y-%m-%d %H:%M:%S\")}] 正在生成HTML文件...')
             subprocess.check_call(
                 ['/usr/local/bin/rent.sh', 'generate_html'],
                 stderr=subprocess.STDOUT
             )
             with open('/var/www/index.html', 'rb') as f:
                 DynamicAuthHandler.cached_html = f.read()
-            print('HTML更新成功')
+            print(f'[{time.strftime(\"%Y-%m-%d %H:%M:%S\")}] HTML更新成功')
         except Exception as e:
-            print(f'生成HTML失败: {str(e)}')
+            print(f'[{time.strftime(\"%Y-%m-%d %H:%M:%S\")}] 生成HTML失败: {str(e)}')
             DynamicAuthHandler.cached_html = '<h1>系统维护中</h1>'.encode('utf-8')
 
     def send_auth_challenge(self):
@@ -1042,14 +1072,14 @@ class DynamicAuthHandler(BaseHTTPRequestHandler):
 
     def log_error(self, format, *args):
         message = format % args
-        print(f'服务端错误: {message}')
+        print(f'[{time.strftime(\"%Y-%m-%d %H:%M:%S\")}] 服务端错误: {message}')
 
-print(f'启动服务，端口：$port')
+print(f'[{time.strftime(\"%Y-%m-%d %H:%M:%S\")}] 启动服务，端口：$port')
 server = HTTPServer(('0.0.0.0', $port), DynamicAuthHandler)
 try:
     server.serve_forever()
 except KeyboardInterrupt:
-    print('服务正常终止')
+    print(f'[{time.strftime(\"%Y-%m-%d %H:%M:%S\")}] 服务正常终止')
     server.server_close()
 " > "$WEB_LOG" 2>&1 &
 
@@ -1088,13 +1118,7 @@ manage_web_service() {
             log "Web服务已停止"
             ;;
         port)
-            read -p "请输入新的Web端口 (默认: 8080): " new_port
-            new_port=${new_port:-8080}
-            if [[ ! "$new_port" =~ ^[0-9]+$ ]] || (( new_port < 1 || new_port > 65535 )); then
-                log "错误：端口号无效"
-                return 1
-            fi
-            echo "$new_port" > "$WEB_PORT_FILE"
+            change_port
             manage_web_service stop
             manage_web_service start
             ;;
@@ -1103,12 +1127,26 @@ manage_web_service() {
             manage_web_service stop
             manage_web_service start
             ;;
+        set)
+            change_password
+            change_port
+            ;;
         *)
-            echo "用法: sudo rent.sh web {start|stop|port|password}"
+            echo "用法: sudo rent.sh web {start|stop|port|password|set}"
             ;;
     esac
 }
 
+change_port() {
+    read -p "请输入新的Web端口 (默认: 8080): " new_port
+    new_port=${new_port:-8080}
+    if [[ ! "$new_port" =~ ^[0-9]+$ ]] || (( new_port < 1 || new_port > 65535 )); then
+        log "错误：端口号无效"
+        return 1
+    fi
+    echo "$new_port" > "$WEB_PORT_FILE"
+}
+ 
 get_web_port() {
     if [ -f "$WEB_PORT_FILE" ] && [[ $(cat "$WEB_PORT_FILE") =~ ^[0-9]+$ ]]; then
         cat "$WEB_PORT_FILE"
