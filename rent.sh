@@ -2,7 +2,16 @@
 
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
-VERSION="V0.8.0"
+if [ -t 1 ]; then
+    RED='\033[0;31m'
+    YELLOW='\033[1;33m'
+    BLUE='\033[0;34m'
+    NC='\033[0m'
+else
+    RED='' YELLOW='' BLUE='' NC=''
+fi
+
+VERSION="V0.8.1"
 MAX_LOG_SIZE=524288
 IPTABLES_PATH="$(command -v iptables)"
 IP6TABLES_PATH="$(command -v ip6tables)"
@@ -19,50 +28,6 @@ WEB_PID_FILE="/etc/rent/rent_web.pid"
 WEB_LOG="/tmp/web_service.log"
 PASSWORD_FILE="/etc/rent/web_pass"
 
-dependencies=(
-  iptables
-  ip6tables
-  python3
-  bc
-  nano
-  cron
-)
-
-missing_deps=()
-
-for dep in "${dependencies[@]}"; do
-  if ! command -v "$dep" &> /dev/null; then
-    missing_deps+=("$dep")
-  fi
-done
-
-if [ ${#missing_deps[@]} -gt 0 ]; then
-  echo "[ERROR] 缺少以下依赖："
-  printf "  - %s\n" "${missing_deps[@]}"
-
-  echo "请根据系统类型自行安装："
-
-  echo "Debian/Ubuntu:"
-  echo "  sudo apt install ${missing_deps[*]}"
-  echo "RHEL/CentOS:"
-  echo "  sudo yum install ${missing_deps[*]}"
-  echo "Alpine:"
-  echo "  sudo apk add ${missing_deps[*]}"
-  echo "Arch:"
-  echo "  sudo pacman -S ${missing_deps[*]}"
-  
-  exit 1
-fi
-
-if [ -t 1 ]; then
-    RED='\033[0;31m'
-    YELLOW='\033[1;33m'
-    BLUE='\033[0;34m'
-    NC='\033[0m'
-else
-    RED='' YELLOW='' BLUE='' NC=''
-fi
-
 PATHS=(
   "$TRAFFIC_SAVE_FILE" "$IPTABLES_SAVE_FILE" "$IP6TABLES_SAVE_FILE"
   "$HTML_FILE" "$LOG_FILE" "$WEB_LOG" "$WEB_PORT_FILE"
@@ -77,7 +42,7 @@ if [ ! -f "$CONFIG_FILE" ]; then
     cat > "$CONFIG_FILE" << EOF
 # 配置格式：单端口/端口范围/两者的自由组合 月度流量限制(GiB) 重置日期(1-28日)
 # 例如：
-# 6020-6030 100.00 1 # 6020-6030端口 月流量限制100G 每月1号重置流量
+# 6020-6030 100.00 1
 # 443,80 1.5 15
 # 5201,5202-5205 1 20 
 # 7020-7030,7090-7095,7096-8000 10 12
@@ -178,9 +143,9 @@ initialize_iptables() {
 
         for custom_chain in "${!chain_rules[@]}"; do
             if "$ipt_cmd" -L "$custom_chain" &>/dev/null; then
-                "$ipt_cmd" -F "$custom_chain"  # Flush existing rules
+                "$ipt_cmd" -F "$custom_chain"
             else
-                "$ipt_cmd" -N "$custom_chain" # Create new chain
+                "$ipt_cmd" -N "$custom_chain"
             fi
         done
 
@@ -209,6 +174,11 @@ initialize_iptables() {
         
         handle_port_rules "-A" "$port_range" "ACCEPT"
     done < <(grep -vE '^[[:space:]]*#' "$CONFIG_FILE")
+
+    local temp_cron=$(mktemp)
+    sudo crontab -l 2>/dev/null | grep -v "# rent" > "$temp_cron"
+    sudo crontab "$temp_cron"
+    rm -f "$temp_cron"
 
     > "$TRAFFIC_SAVE_FILE"
     save_iptables_rules
@@ -463,7 +433,7 @@ pause_and_clear() {
 }
 
 add_cron_tasks() {
-    local check_time="${1:-"*/1 * * * *"}"
+    local check_time="${1:-"*/2 * * * *"}"
     local log_time="${2:-"0 0 * * *"}"
 
     current_cron=$(sudo crontab -l 2>/dev/null)
@@ -836,7 +806,7 @@ show_usage() {
 	交互用法: {命令选项} [参数]
 
 	命令选项:
-	  set                      设置配置文件 (用于首次配置)
+	  set                      设置配置文件 (仅用于首次配置)
 	  init                     初始化Rent-PL服务
 	  cancel                   终止Rent-PL服务
 	  restart                  再启动Rent-PL服务 (用于cancel之后)
