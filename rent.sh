@@ -802,8 +802,8 @@ uninstall_rent() {
 
 show_usage() {
     cat <<-EOF
-	命令行用法: sudo rent.sh {命令选项} [参数]
-	交互用法: {命令选项} [参数]
+	交互模式: sudo rent.sh
+	命令行模式: sudo rent.sh {命令选项} [其他参数]
 
 	命令选项:
 	  set                      设置配置文件 (仅用于首次配置)
@@ -826,8 +826,8 @@ show_usage() {
 
 show_usage_web() {
     cat <<-EOF
-	命令行用法: sudo rent.sh web [第二参数]
-	交互用法: {第二参数} 
+	交互模式: sudo rent.sh web
+	命令行模式: sudo rent.sh web [第二参数]
 
 	第二参数:
 	  start                     启动WEB服务
@@ -1436,7 +1436,7 @@ manage_web_service() {
 
 interactive_web() {
     while true; do
-        read -p "请输入选择 (输入q/quit退出): " choice
+        read -p "请输入第二参数 (输入q/quit退出): " choice
         echo ""
         [[ "$choice" == "q" || "$choice" == "quit" ]] && break
         handle_web_command "$choice"
@@ -1476,7 +1476,7 @@ handle_command() {
             show_stats
             ;;
         web)
-            manage_web_service "$1"
+            manage_web_service "$@"
             ;;
         log)
             show_logs
@@ -1523,7 +1523,7 @@ handle_command() {
 
 interactive_main() {
     while true; do
-        read -p "请输入选择 (输入q/quit退出): " choice
+        read -p "请输入命令选项 (输入q/quit退出): " choice
         echo ""
         [[ "$choice" == "q" || "$choice" == "quit" ]] && break
         set -- $choice
