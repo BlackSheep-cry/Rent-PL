@@ -11,7 +11,7 @@ else
     RED='' YELLOW='' BLUE='' NC=''
 fi
 
-VERSION="V0.8.1"
+VERSION="V0.8.1-Fix"
 MAX_LOG_SIZE=524288
 IPTABLES_PATH="$(command -v iptables)"
 IP6TABLES_PATH="$(command -v ip6tables)"
@@ -803,7 +803,7 @@ uninstall_rent() {
 show_usage() {
     cat <<-EOF
 	交互模式: sudo rent.sh
-	命令行模式: sudo rent.sh {命令选项} [其他参数]
+	命令行模式: sudo rent.sh {命令选项} [其他]
 
 	命令选项:
 	  set                      设置配置文件 (仅用于首次配置)
@@ -811,7 +811,7 @@ show_usage() {
 	  cancel                   终止Rent-PL服务
 	  restart                  再启动Rent-PL服务 (用于cancel之后)
 	  status                   显示流量使用情况
-	  web    <第二参数>        管理网页服务
+	  web    <WEB参数>         管理网页服务
 	  log                      输出日志
 	  add    <端口范围> <日期> 添加端口
 	  del    <端口范围>        删除端口
@@ -827,9 +827,9 @@ show_usage() {
 show_usage_web() {
     cat <<-EOF
 	交互模式: sudo rent.sh web
-	命令行模式: sudo rent.sh web [第二参数]
+	命令行模式: sudo rent.sh web [WEB参数]
 
-	第二参数:
+	WEB参数:
 	  start                     启动WEB服务
 	  stop                      停止WEB服务
 	  restart                   重启WEB服务
@@ -1436,7 +1436,7 @@ manage_web_service() {
 
 interactive_web() {
     while true; do
-        read -p "请输入第二参数 (输入q/quit退出): " choice
+        read -p "请输入WEB参数 (输入q/quit退出): " choice
         echo ""
         [[ "$choice" == "q" || "$choice" == "quit" ]] && break
         handle_web_command "$choice"
