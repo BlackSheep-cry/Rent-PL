@@ -831,12 +831,12 @@ show_usage_web() {
 
 	第二参数:
 	  start                     启动WEB服务
-	  stop                  停止WEB服务
+	  stop                      停止WEB服务
 	  restart                   重启WEB服务
-	  ssl                   设置WEB模式
+	  ssl                       设置WEB模式
 	  port                      设置WEB端口
-	  password                设置WEB密码
-	  set                    设置模式、端口及密码 (该选项不重启WEB服务)
+	  password                  设置WEB密码
+	  set                       设置模式、端口及密码 (该选项不重启WEB服务)
 	EOF
 }
 
@@ -1321,39 +1321,41 @@ set_rent_config() {
         nano "$CONFIG_FILE"
     fi
 
-    while true; do
-        while :; do
-            read -p "请输入端口、端口范围及二者的自由组合：" ports
-            if [[ "$ports" =~ ^([0-9]+(-[0-9]+)?)(,([0-9]+(-[0-9]+)?))*$ ]]; then
-                break
-            fi
-            echo "[ERROR] 无效格式！请使用单端口 (80)、范围 (6000-6010)或组合 (80,443,6000-6010)"
-        done
+    if [[ "$manual_edit" =~ ^[nN] ]]; then
+      while true; do
+          while :; do
+              read -p "请输入端口、端口范围及二者的自由组合：" ports
+              if [[ "$ports" =~ ^([0-9]+(-[0-9]+)?)(,([0-9]+(-[0-9]+)?))*$ ]]; then
+                  break
+              fi
+              echo "[ERROR] 无效格式！请使用单端口 (80)、范围 (6000-6010)或组合 (80,443,6000-6010)"
+          done
 
-        while :; do
-            read -p "请输入月流量限制（单位GiB，支持两位小数）：" traffic
-            if [[ "$traffic" =~ ^[0-9]+(\.[0-9]{1,2})?$ ]]; then
-                break
-            fi
-            echo "[ERROR] 无效格式！示例：100 或 50.5 或 25.75"
-        done
+          while :; do
+              read -p "请输入月流量限制（单位GiB，支持两位小数）：" traffic
+              if [[ "$traffic" =~ ^[0-9]+(\.[0-9]{1,2})?$ ]]; then
+                  break
+              fi
+              echo "[ERROR] 无效格式！示例：100 或 50.5 或 25.75"
+          done
 
-        while :; do
-            read -p "请输入流量重置日（1-28）：" reset_day
-            if [[ "$reset_day" =~ ^[0-9]+$ ]] && [ "$reset_day" -ge 1 ] && [ "$reset_day" -le 28 ]; then
-                break
-            fi
-            echo "[ERROR] 日期必须为1-28之间的整数！"
-        done
+          while :; do
+              read -p "请输入流量重置日（1-28）：" reset_day
+              if [[ "$reset_day" =~ ^[0-9]+$ ]] && [ "$reset_day" -ge 1 ] && [ "$reset_day" -le 28 ]; then
+                  break
+              fi
+              echo "[ERROR] 日期必须为1-28之间的整数！"
+          done
 
-        config_entry="$ports $traffic $reset_day"
-        echo "$config_entry" | sudo tee -a "$CONFIG_FILE" >/dev/null
-        echo "[INFO] 已添加配置项：$config_entry"
-        echo ""
+          config_entry="$ports $traffic $reset_day"
+          echo "$config_entry" | sudo tee -a "$CONFIG_FILE" >/dev/null
+          echo "[INFO] 已添加配置项：$config_entry"
+          echo ""
 
-        read -p "是否继续添加配置？(y/n) " continue
-        [[ "$continue" =~ ^[nN] ]] && break
-    done
+          read -p "是否继续添加配置？(y/n) " continue
+          [[ "$continue" =~ ^[nN] ]] && break
+      done
+    fi
 
     cp "$CONFIG_FILE" "$CP_FILE" || {
         echo "[ERROR] 备份配置文件失败，请检查权限和路径"
