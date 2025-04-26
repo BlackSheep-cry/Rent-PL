@@ -12,6 +12,7 @@
 ### ⚠注意事项
 - 如果你的****流量转发使用的是iptables****，****请将落地机和中转机端口保持一致****，否则脚本无法正常统计流量
 - 如果你设置的端口在动态端口范围内(用```sysctl net.ipv4.ip_local_port_range```查询)，****请确保端口有服务在监听****，否则有小概率多统计流量
+- status命令显示的月度流量限制在机器重启后发生变化是预期行为，而WEB中则不会发生变化
 
 ### 📑快速使用
 > **以下以Debian/Ubuntu为示例**
@@ -20,21 +21,16 @@
 
 ```
 sudo apt update && sudo apt upgrade
-sudo apt install iptables bc python3 wget nano
+sudo apt install iptables bc python3 wget nano openssl
 ```
 > 其他部分发行版可能还需手动安装cron (cronie/dcron)
 
-****2. 下载脚本****
+****2. 下载脚本并配置服务****
 ```
-wget -q https://raw.githubusercontent.com/BlackSheep-cry/Rent-PL/main/rent.sh -O /usr/local/bin/rent.sh && chmod +x /usr/local/bin/rent.sh
-```
-
-****3. 初始设置****
-```
-sudo rent.sh set
+wget -q https://raw.githubusercontent.com/BlackSheep-cry/Rent-PL/main/rent.sh -O /usr/local/bin/rent.sh && chmod +x /usr/local/bin/rent.sh && rent.sh set
 ```
 
-****4. 端口配置模板****
+****3. 端口配置模板****
 ```
 配置格式：单端口/端口范围/两者的自由组合 月度流量限制(GiB) 重置日期(1-28日)
 例如：
@@ -45,17 +41,12 @@ sudo rent.sh set
 PS: 组合时请用英文逗号隔开
 ```
 
-****5. 初始化服务****
-```
-sudo rent.sh init
-```
-
-****6-A. 交互模式****
+****4-A. 进入交互****
 ```
 sudo rent.sh
 ```
 
-****6-B. 命令行模式****
+****4-B. 使用命令行****
 ```
 sudo rent.sh 命令选项
 ```
