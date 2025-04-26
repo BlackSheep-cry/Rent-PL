@@ -777,10 +777,7 @@ update_auto() {
 }
 
 uninstall_rent() {
-    echo "卸载前请先执行该命令停止服务："
-    echo "sudo rent.sh cancel"
-
-    read -p "若已执行过上述命令，请输入 Y 确认卸载（其他键取消）: " confirm
+    read -p "请输入 Y 确认卸载（其他键取消）: " confirm
     if [[ "$confirm" != "Y" && "$confirm" != "y" ]]; then
         echo "卸载已取消"
         exit 0
@@ -798,7 +795,6 @@ uninstall_rent() {
         "$IP6TABLES_SAVE_FILE"
         "$WEB_PORT_FILE"
         "$HTML_FILE"
-        "$WEB_PID_FILE"
         "$PASSWORD_FILE"
         "$WEB_LOG"
         "$WEB_FILE"
@@ -1542,6 +1538,7 @@ handle_command() {
             update_auto
             ;;
         uninstall)
+            handle_command cancel
             uninstall_rent
             ;;
         generate_html)
