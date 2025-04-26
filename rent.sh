@@ -1,17 +1,18 @@
 #!/usr/bin/env bash
+### === 脚本描述 === ###
+# 名称: Rent-PL
+# 功能: 对用户指定的端口组进行流量统计、限制及周期性重置
+# 作者: BlackSheep <https://www.nodeseek.com/space/15055>
+# 创建日期: 2025-03-29
+# 许可证: GPLv3
 
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
-if [ -t 1 ]; then
-    RED='\033[0;31m'
-    YELLOW='\033[1;33m'
-    BLUE='\033[0;34m'
-    NC='\033[0m'
-else
-    RED='' YELLOW='' BLUE='' NC=''
-fi
+[[ $EUID -ne 0 ]] && echo "[ERROR] 请以root用户或sudo运行此脚本！" && exit 1
 
-VERSION="V0.8.1-Fix"
+SCRIPT_VERSION="V0.8.2"
+SCRIPT_NAME="Rent-PL"
+SCRIPT_AUTHOR="@BlackSheep <https://www.nodeseek.com/space/15055>"
 MAX_LOG_SIZE=524288
 IPTABLES_PATH="$(command -v iptables)"
 IP6TABLES_PATH="$(command -v ip6tables)"
@@ -28,18 +29,45 @@ WEB_PID_FILE="/etc/rent/rent_web.pid"
 WEB_LOG="/tmp/web_service.log"
 PASSWORD_FILE="/etc/rent/web_pass"
 
-PATHS=(
+RED='\033[0;31m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m'
+
+CFPATHS=(
   "$TRAFFIC_SAVE_FILE" "$IPTABLES_SAVE_FILE" "$IP6TABLES_SAVE_FILE"
   "$HTML_FILE" "$LOG_FILE" "$WEB_LOG" "$WEB_PORT_FILE"
 )
 
-for path in "${PATHS[@]}"; do
-  mkdir -p "$(dirname "$path")"
-  touch "$path"
-done
+check_dependencies() {
+    local deps=(
+        "iptables" "ip6tables" "crontab"
+        "awk" "sed" "grep" "date" "ps" "nano"
+        "bc" "wget" "openssl" "python3"
+    )
+    for cmd in "${deps[@]}"; do
+        if ! command -v "$cmd" &>/dev/null; then
+            echo "缺少必要命令: $cmd"
+            exit 1
+        fi
+    done
+}
 
-if [ ! -f "$CONFIG_FILE" ]; then
-    cat > "$CONFIG_FILE" << EOF
+interrupt() {
+    echo ""
+    log "INFO" "脚本被中断..."
+    exit 130
+}
+trap interrupt SIGINT SIGTERM
+
+init_config() {
+    for path in "${CFPATHS[@]}"; do
+      mkdir -p "$(dirname "$path")"
+      touch "$path"
+    done
+
+    if [ ! -f "$CONFIG_FILE" ]; then
+        cat > "$CONFIG_FILE" << EOF
 # 配置格式：单端口/端口范围/两者的自由组合 月度流量限制(GiB) 重置日期(1-28日)
 # 例如：
 # 6020-6030 100.00 1
@@ -47,7 +75,8 @@ if [ ! -f "$CONFIG_FILE" ]; then
 # 5201,5202-5205 1 20 
 # 7020-7030,7090-7095,7096-8000 10 12
 EOF
-fi
+    fi
+}
 
 clear_log() {
     if [ -f "$LOG_FILE" ] && [ "$(stat -c %s "$LOG_FILE")" -gt "$MAX_LOG_SIZE" ]; then
@@ -744,7 +773,7 @@ update_auto() {
     chmod 755 "$tmp_file"
     mv -f "$tmp_file" "$install_path"
     log "INFO" "脚本已成功更新到最新版本！"
-    echo "[INFO] 当前版本：$VERSION => 最新版本：$(grep '^VERSION=' "$install_path" | cut -d'"' -f2)"
+    echo "[INFO] 当前版本：$SCRIPT_VERSION => 最新版本：$(grep '^SCRIPT_VERSION=' "$install_path" | cut -d'"' -f2)"
 }
 
 uninstall_rent() {
@@ -801,12 +830,17 @@ uninstall_rent() {
 }
 
 show_usage() {
+    echo -e "\033[1;38;5;208m────────────────────────────────────────────────\033[0m"
+    echo -e "\033[1;38;5;118m脚本名称 » \033[0m \033[38;5;183m$SCRIPT_NAME\033[0m"
+    echo -e "\033[1;38;5;118m当前版本 » \033[0m \033[1;38;5;45m$SCRIPT_VERSION\033[0m"
+    echo -e "\033[1;38;5;118m开发作者 » \033[0m \033[38;5;210m$SCRIPT_AUTHOR\033[0m"
+    echo -e "\033[1;38;5;208m────────────────────────────────────────────────\033[0m"
+    echo ""
+
     cat <<-EOF
-	交互模式: sudo rent.sh
-	命令行模式: sudo rent.sh {命令选项} [其他]
+	使用方法: sudo rent.sh {命令选项} [其他]——无参数进入交互
 
 	命令选项:
-	  set                      设置配置文件 (仅用于首次配置)
 	  init                     初始化Rent-PL服务
 	  cancel                   终止Rent-PL服务
 	  restart                  再启动Rent-PL服务 (用于cancel之后)
@@ -826,8 +860,7 @@ show_usage() {
 
 show_usage_web() {
     cat <<-EOF
-	交互模式: sudo rent.sh web
-	命令行模式: sudo rent.sh web [WEB参数]
+	使用方法: sudo rent.sh web [WEB参数]——无参数进入交互
 
 	WEB参数:
 	  start                     启动WEB服务
@@ -836,7 +869,6 @@ show_usage_web() {
 	  ssl                       设置WEB模式
 	  port                      设置WEB端口
 	  password                  设置WEB密码
-	  set                       设置模式、端口及密码 (该选项不重启WEB服务)
 	EOF
 }
 
@@ -1026,7 +1058,7 @@ EOF
 }
 
 web_server() {
-    init_config
+    init_web_config
     local port=${1:-8080}
     local mode=$(get_config MODE)
     local cert_path=$(get_config CERT_PATH)
@@ -1131,10 +1163,10 @@ class DynamicAuthHandler(BaseHTTPRequestHandler):
                 self.end_headers()
                 return
 
-            print(f'[{time.strftime(\"%Y-%m-%d %H:%M:%S\")}] [INFO] 收到请求: {self.path}')
+            print(f'[{time.strftime(\"%Y-%m-%d %H:%M:%S\")}] [INFO] 收到请求路径: {self.path}')
             auth = self.headers.get('Authorization', '')
             if not auth.startswith('Basic '):
-                print(f'[{time.strftime(\"%Y-%m-%d %H:%M:%S\")}] [INFO] 未认证请求 来自IP: {client_ip}')
+                print(f'[{time.strftime(\"%Y-%m-%d %H:%M:%S\")}] [INFO] 尚未认证请求 来自IP: {client_ip}')
                 self.send_auth_challenge()
                 return
             
@@ -1174,7 +1206,7 @@ class DynamicAuthHandler(BaseHTTPRequestHandler):
 
     def update_html(self):
         try:
-            print(f'[{time.strftime(\"%Y-%m-%d %H:%M:%S\")}] [INFO] 正在生成HTML文件...')
+            print(f'[{time.strftime(\"%Y-%m-%d %H:%M:%S\")}] [INFO] 认证成功，正在生成HTML文件...')
             subprocess.check_call(
                 ['/usr/local/bin/rent.sh', 'generate_html'],
                 stderr=subprocess.STDOUT
@@ -1270,7 +1302,7 @@ change_password() {
     log "INFO" "密码已更新"
 }
 
-init_config() {
+init_web_config() {
     if [ ! -f "$WEB_FILE" ]; then
         cat > "$WEB_FILE" <<EOF
 MODE=https_selfsigned
@@ -1400,7 +1432,7 @@ handle_web_command() {
             handle_web_command start
             ;;
         ssl)
-            init_config
+            init_web_config
             configure_service_mode
             handle_web_command restart
             ;;
@@ -1413,7 +1445,7 @@ handle_web_command() {
             handle_web_command restart
             ;;
         set)
-            init_config
+            init_web_config
             configure_service_mode
             change_password
             change_port
@@ -1447,8 +1479,11 @@ handle_command() {
     local cmd=$1; shift
     case "$cmd" in
         set)
+            check_dependencies
+            init_config
             set_rent_config
             manage_web_service set
+            handle_command init
             ;;
         init)
             log "INFO" "初始化Rent-PL服务"
