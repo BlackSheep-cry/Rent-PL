@@ -10,7 +10,7 @@ export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 [[ $EUID -ne 0 ]] && echo "[ERROR] 请以root用户或sudo运行此脚本！" && exit 1
 
-SCRIPT_VERSION="V0.8.2-Enhanced"
+SCRIPT_VERSION="V0.8.3"
 SCRIPT_NAME="Rent-PL"
 SCRIPT_AUTHOR="@BlackSheep <https://www.nodeseek.com/space/15055>"
 MAX_LOG_SIZE=524288
@@ -1056,7 +1056,8 @@ web_server() {
     init_web_config
     local port=${1:-8080}
     local mode=$(get_config MODE)
-    local cert_path=$(get_config CERT_PATH)
+    local cert_file=$(get_config CERT_FILE)
+    local key_file=$(get_config KEY_FILE)
 
     generate_html
 
@@ -1075,19 +1076,23 @@ web_server() {
             ssl_wrap=""
             ;;
         https_selfsigned)
-            echo "[INFO] 启动HTTPS服务，使用临时自签名证书"
-            openssl req -x509 -newkey rsa:4096 -nodes -keyout /tmp/key.pem -out /tmp/cert.pem -days 3650 -subj "/CN=localhost" 2>/dev/null
+            echo "[INFO] 启动HTTPS服务，使用自签名证书"
+            openssl req -x509 -newkey rsa:4096 -nodes -keyout /tmp/key.pem -out /tmp/cert.pem -days 3650 -subj "/CN=Rent-PL" 2>/dev/null
             bind_ip="0.0.0.0"
             ssl_wrap="1"
             ;;
         https_custom)
-            if [ ! -f "$cert_path/cert.pem" ] || [ ! -f "$cert_path/key.pem" ]; then
-                log "ERROR" "自定义证书文件不存在！"
+            if [ -z "$cert_file" ] || [ -z "$key_file" ] || [ ! -f "$cert_file" ] || [ ! -f "$key_file" ]; then
+                log "ERROR" "指定的证书或密钥文件不存在，请检查 "$WEB_FILE" 中的 CERT_FILE 与 KEY_FILE 设置"
                 return 1
             fi
-            echo "[INFO] 启动HTTPS服务，使用自定义证书"
+            echo "[INFO] 启动HTTPS服务，使用指定证书"
             bind_ip="0.0.0.0"
             ssl_wrap="1"
+            ;;
+        *)
+            log "ERROR" "未知的运行模式: $mode"
+            return 1
             ;;
     esac
 
@@ -1101,27 +1106,26 @@ import traceback
 import hmac
 import ssl
 from collections import defaultdict
+from threading import Semaphore
 
 MAX_CONCURRENT = 50
-from threading import Semaphore
 concurrency_limiter = Semaphore(MAX_CONCURRENT)
 
 RATE_LIMIT = 10
 request_timestamps = defaultdict(list)
 
 ssl_enabled = False
-cert_file = ''
-key_file = ''
+cert_path_py = ''
+key_path_py = ''
 
 if '$ssl_wrap' == '1':
-    import ssl
     ssl_enabled = True
     if '$mode' == 'https_selfsigned':
-        cert_file = '/tmp/cert.pem'
-        key_file = '/tmp/key.pem'
+        cert_path_py = '/tmp/cert.pem'
+        key_path_py = '/tmp/key.pem'
     else:
-        cert_file = '$cert_path/cert.pem'
-        key_file = '$cert_path/key.pem'
+        cert_path_py = '$cert_file'
+        key_path_py = '$key_file'
 
 class DynamicAuthHandler(BaseHTTPRequestHandler):
     last_update = 0
@@ -1233,10 +1237,10 @@ server = HTTPServer(('$bind_ip', $port), DynamicAuthHandler)
 if ssl_enabled:
     try:
         context = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
-        context.load_cert_chain(certfile=cert_file, keyfile=key_file)
+        context.load_cert_chain(certfile=cert_path_py, keyfile=key_path_py)
         context.minimum_version = ssl.TLSVersion.TLSv1_2
         server.socket = context.wrap_socket(server.socket, server_side=True)
-        print(f'[{time.strftime(\"%Y-%m-%d %H:%M:%S\")}] [INFO] SSL 已启用，使用证书: {cert_file}')
+        print(f'[{time.strftime(\"%Y-%m-%d %H:%M:%S\")}] [INFO] SSL 已启用，使用证书: {cert_path_py}')
     except Exception as e:
         print(f'[{time.strftime(\"%Y-%m-%d %H:%M:%S\")}] [ERROR] SSL 配置失败: {str(e)}')
         raise
@@ -1301,7 +1305,8 @@ init_web_config() {
     if [ ! -f "$WEB_FILE" ]; then
         cat > "$WEB_FILE" <<EOF
 MODE=https_selfsigned
-CERT_PATH=
+CERT_FILE=
+KEY_FILE=
 EOF
     fi
 }
@@ -1312,28 +1317,33 @@ get_config() {
 
 configure_service_mode() {
     echo "请选择WEB服务运行模式："
-    echo "1) HTTP + 自行配置Nginx/Caddy等作为前置 (推荐)"
-    echo "2) HTTPS + 自签名证书"
-    echo "3) HTTPS + 自有证书"
+    echo "1) HTTP +  自行配置Nginx/Caddy等作为前置 (推荐)"
+    echo "2) HTTPS + 自签证书"
+    echo "3) HTTPS + CA证书"
     read -p "请输入选项数字：" mode_choice
 
     case $mode_choice in
         1)
             sed -i "s/^MODE=.*/MODE=http/" "$WEB_FILE"
-            sed -i "/^CERT_PATH/d" "$WEB_FILE"
+            sed -i "/^CERT_FILE/d;/^KEY_FILE/d" "$WEB_FILE"
             ;;
         2)
             sed -i "s/^MODE=.*/MODE=https_selfsigned/" "$WEB_FILE"
-            sed -i "/^CERT_PATH/d" "$WEB_FILE"
+            sed -i "/^CERT_FILE/d;/^KEY_FILE/d" "$WEB_FILE"
             ;;
         3)
-            read -p "请输入证书目录路径（需包含cert.pem和key.pem）：" cert_dir
-            if [ ! -f "$cert_dir/cert.pem" ] || [ ! -f "$cert_dir/key.pem" ]; then
-                echo "[ERROR] 证书文件cert.pem或key.pem不存在！"
+            read -p "请输入证书文件路径（如 /path/to/cert.crt）：" cf
+            read -p "请输入密钥文件路径（如 /path/to/key.key）：" kf
+
+            if [ ! -f "$cf" ] || [ ! -f "$kf" ]; then
+                echo "[ERROR] 指定的证书或密钥文件不存在！"
                 return 1
             fi
+
             sed -i "s/^MODE=.*/MODE=https_custom/" "$WEB_FILE"
-            echo "CERT_PATH=$cert_dir" >> "$WEB_FILE"
+            sed -i "/^CERT_FILE/d;/^KEY_FILE/d" "$WEB_FILE"
+            echo "CERT_FILE=$cf" >> "$WEB_FILE"
+            echo "KEY_FILE=$kf" >> "$WEB_FILE"
             ;;
         *)
             echo "[WARN] 无效选项，配置未更改"
