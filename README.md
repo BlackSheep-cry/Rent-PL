@@ -25,7 +25,7 @@ sudo apt install iptables bc python3 wget nano openssl
 ```
 > 其他部分发行版可能还需手动安装cron (cronie/dcron)
 
-****2. 下载脚本并配置服务****
+****2. 下载并启动脚本****
 ```
 wget -q https://raw.githubusercontent.com/BlackSheep-cry/Rent-PL/main/rent.sh -O /usr/local/bin/rent.sh && chmod +x /usr/local/bin/rent.sh && rent.sh set
 ```
