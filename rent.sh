@@ -10,7 +10,7 @@ export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 [[ $EUID -ne 0 ]] && echo "[ERROR] 请以root用户或sudo运行此脚本！" && exit 1
 
-SCRIPT_VERSION="V0.8.2"
+SCRIPT_VERSION="V0.8.2-Enhanced"
 SCRIPT_NAME="Rent-PL"
 SCRIPT_AUTHOR="@BlackSheep <https://www.nodeseek.com/space/15055>"
 MAX_LOG_SIZE=524288
@@ -837,18 +837,17 @@ show_usage() {
 	使用方法: sudo rent.sh {命令选项} [其他]——无参数进入交互
 
 	命令选项:
-	  init                     初始化Rent-PL服务
-	  cancel                   终止Rent-PL服务
-	  restart                  再启动Rent-PL服务 (用于cancel之后)
-	  status                   显示流量使用情况
+	  stop                     终止Rent-PL服务
+	  start                    启动Rent-PL服务
+	  restart                  重启Rent-PL服务
+	  init                     重置/初始化Rent-PL服务
 	  web    <WEB参数>         管理网页服务
+	  add    <端口范围> <日期> 添加新的端口组
+	  del    <端口范围>        删除指定端口组
+	  reset  <端口范围>        重置指定端口组流量—手动
+	  status                   显示流量使用情况
 	  log                      输出日志
-	  add    <端口范围> <日期> 添加端口
-	  del    <端口范围>        删除端口
-	  reset  <端口范围>        重置端口流量
-	  check                    流量审查
-	  recover                  恢复Rent-PL服务 (用于cron)
-	  clear                    清理日志文件
+	  check                    流量超限审查—手动
 	  update                   更新脚本
 	  uninstall                卸载脚本
 	EOF
@@ -1482,26 +1481,30 @@ handle_command() {
             handle_command init
             ;;
         init)
-            log "INFO" "初始化Rent-PL服务"
+            log "INFO" "初始化/重置Rent-PL服务"
             initialize_iptables
             add_cron_tasks
             add_re_cron_task
             manage_web_service start
             ;;
-        restart)
-            log "INFO" "再启动Rent-PL服务"
+        start)
+            log "INFO" "启动Rent-PL服务"
             save_remaining_limits
             restore_iptables_rules
             add_cron_tasks
             add_re_cron_task
             manage_web_service start
             ;;
-        cancel)
+        stop)
             log "INFO" "终止Rent-PL服务"
             save_traffic_usage
             save_iptables_rules
             pause_and_clear
             manage_web_service stop
+            ;;
+        restart)
+            handle_command stop
+            handle_command start
             ;;
         status)
             show_stats
@@ -1538,7 +1541,7 @@ handle_command() {
             update_auto
             ;;
         uninstall)
-            handle_command cancel
+            handle_command stop
             uninstall_rent
             ;;
         generate_html)
