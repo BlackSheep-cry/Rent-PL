@@ -774,6 +774,7 @@ update_auto() {
     mv -f "$tmp_file" "$install_path"
     log "INFO" "脚本已成功更新到最新版本！"
     echo "[INFO] 当前版本：$SCRIPT_VERSION => 最新版本：$(grep '^SCRIPT_VERSION=' "$install_path" | cut -d'"' -f2)"
+    echo "[INFO] 建议使用restart命令重启服务以应用更新"
 }
 
 uninstall_rent() {
@@ -1487,7 +1488,7 @@ handle_command() {
             check_dependencies
             init_config
             set_rent_config
-            manage_web_service set
+            handle_web_command set
             handle_command init
             ;;
         init)
@@ -1495,7 +1496,7 @@ handle_command() {
             initialize_iptables
             add_cron_tasks
             add_re_cron_task
-            manage_web_service start
+            handle_web_command start
             ;;
         start)
             log "INFO" "启动Rent-PL服务"
@@ -1503,14 +1504,14 @@ handle_command() {
             restore_iptables_rules
             add_cron_tasks
             add_re_cron_task
-            manage_web_service start
+            handle_web_command start
             ;;
         stop)
             log "INFO" "终止Rent-PL服务"
             save_traffic_usage
             save_iptables_rules
             pause_and_clear
-            manage_web_service stop
+            handle_web_command stop
             ;;
         restart)
             handle_command stop
@@ -1542,7 +1543,7 @@ handle_command() {
             log "INFO" "恢复Rent-PL服务"
             save_remaining_limits
             restore_iptables_rules
-            manage_web_service start
+            handle_web_command start
             ;;
         clear)
             clear_log
