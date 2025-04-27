@@ -54,4 +54,4 @@ sudo rent.sh 命令选项
 ### ⭐使用截图
 |***WEB***|***交互***|
 |---|---|
-|![image](https://raw.githubusercontent.com/BlackSheep-cry/Rent-PL/main/images/WEB.png)|![image](https://raw.githubusercontent.com/BlackSheep-cry/Rent-PL/main/images/interactive.png)|
+|![image](https://raw.githubusercontent.com/BlackSheep-cry/Rent-PL/main/images/WEB.png)|![image](https://raw.githubusercontent.com/BlackSheep-cry/Rent-PL/main/images/interactive2.png)|
