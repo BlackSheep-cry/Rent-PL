@@ -1,18 +1,13 @@
 #!/usr/bin/env bash
-### === 脚本描述 === ###
-# 名称: Rent-PL
-# 功能: 对用户指定的端口组进行流量统计、限制及周期性重置
-# 作者: BlackSheep <https://www.nodeseek.com/space/15055>
-# 创建日期: 2025-03-29
-# 许可证: GPLv3
 
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 [[ $EUID -ne 0 ]] && echo "[ERROR] 请以root用户或sudo运行此脚本！" && exit 1
 
-SCRIPT_VERSION="V0.8.3"
+SCRIPT_VERSION="V0.8.4"
 SCRIPT_NAME="Rent-PL"
 SCRIPT_AUTHOR="@BlackSheep <https://www.nodeseek.com/space/15055>"
+UPDATE_NOTES="1.优化更新功能，增加dev版和更新说明\n2.增强WEB功能独立性，添加WEB开机自启管理"
 MAX_LOG_SIZE=524288
 IPTABLES_PATH="$(command -v iptables)"
 IP6TABLES_PATH="$(command -v ip6tables)"
@@ -377,7 +372,7 @@ show_stats() {
 
         echo "端口范围 $port_range:"
         echo "  当前使用：$total_gb GiB"
-        echo "  月度限制：$limit GiB"
+        echo "  本月限制：$limit GiB"
         echo "  重置日期：每月 $reset_day 日"
         echo "  当前状态：$status"
         echo "-------------------"
@@ -759,9 +754,9 @@ re_iptables_range() {
 }
 
 update_auto() {
+    local script_url=$1
     log "INFO" "正在检查更新..."
-    local tmp_file=$(mktemp)
-    local script_url="https://raw.githubusercontent.com/BlackSheep-cry/Rent-PL/main/rent.sh"
+    local tmp_file=$(mktemp) || { log "ERROR" "创建临时文件失败"; return 1; }
     local install_path="/usr/local/bin/rent.sh"
 
     if ! wget -qO "$tmp_file" "$script_url"; then
@@ -770,11 +765,50 @@ update_auto() {
         return 1
     fi
 
-    chmod 755 "$tmp_file"
-    mv -f "$tmp_file" "$install_path"
-    log "INFO" "脚本已成功更新到最新版本！"
-    echo "[INFO] 当前版本：$SCRIPT_VERSION => 最新版本：$(grep '^SCRIPT_VERSION=' "$install_path" | cut -d'"' -f2)"
-    echo "[INFO] 建议使用restart命令重启服务以应用更新"
+    local new_version=$(grep '^SCRIPT_VERSION=' "$tmp_file" | cut -d'"' -f2)
+    if [ -z "$new_version" ]; then
+        log "ERROR" "下载的脚本中未找到版本号"
+        rm -f "$tmp_file"
+        return 1
+    fi
+
+    if [ "$new_version" == "$SCRIPT_VERSION" ]; then
+        log "INFO" "当前已是最新版本 (版本号：$SCRIPT_VERSION)"
+        rm -f "$tmp_file"
+        return 0
+    fi
+
+    local update_notes=$(grep '^UPDATE_NOTES=' "$tmp_file" | cut -d'"' -f2 | sed 's/\\n/\n/g')
+
+    echo "[INFO] 发现新版本：$new_version"
+    echo "[INFO] 当前版本：$SCRIPT_VERSION"
+    [ -n "$update_notes" ] && echo -e "更新说明：\n${update_notes}\n"
+
+    read -p "是否立即更新？[Y/n] " -t 60 confirm
+    confirm=${confirm:-Y}
+    case "$confirm" in
+        [Yy]*) 
+            if ! chmod 755 "$tmp_file"; then
+                log "ERROR" "设置权限失败"
+                rm -f "$tmp_file"
+                return 1
+            fi
+            
+            if mv -f "$tmp_file" "$install_path"; then
+                log "INFO" "脚本已成功更新到 $new_version"
+                echo "[INFO] 建议使用 restart 命令重启服务以应用更新"
+            else
+                log "ERROR" "替换脚本失败"
+                rm -f "$tmp_file"
+                return 1
+            fi
+            ;;
+        *)
+            log "INFO" "已取消更新"
+            rm -f "$tmp_file"
+            return 0
+            ;;
+    esac
 }
 
 uninstall_rent() {
@@ -850,6 +884,7 @@ show_usage() {
 	  log                      输出日志
 	  check                    流量超限审查—手动
 	  update                   更新脚本
+	  dev                      更新开发版脚本
 	  uninstall                卸载脚本
 	EOF
 }
@@ -859,6 +894,7 @@ show_usage_web() {
 	使用方法: sudo rent.sh web [WEB参数]——无参数进入交互
 
 	WEB参数:
+	  cron                      管理WEB开机自启功能
 	  start                     启动WEB服务
 	  stop                      停止WEB服务
 	  restart                   重启WEB服务
@@ -1403,9 +1439,67 @@ set_rent_config() {
     echo "[INFO] 基础配置已完成"
 }
 
+manage_web_autostart() {
+    local current_cron=$(sudo crontab -l 2>/dev/null)
+    local status="关闭"
+    
+    if echo "$current_cron" | grep -q "@reboot /usr/local/bin/rent.sh recover_web # rent"; then
+        status="开启"
+    fi
+
+    echo "当前WEB开机自启功能状态：$status"
+    echo "1. 开启WEB开机自启功能"
+    echo "2. 关闭WEB开机自启功能"
+    echo "3. 退出操作"
+    echo ""
+    read -p "请输入选项数字 (1-3): " choice
+
+    case $choice in
+        1)
+            new_cron=$(echo "$current_cron" | grep -v "@reboot /usr/local/bin/rent.sh recover_web # rent")
+            new_cron+=$'\n@reboot /usr/local/bin/rent.sh recover_web # rent'
+            echo "$new_cron" | sudo crontab -
+            log "INFO" "WEB自启功能已开启"
+            ;;
+        2)
+            new_cron=$(echo "$current_cron" | grep -v "@reboot /usr/local/bin/rent.sh recover_web # rent")
+            echo "$new_cron" | sudo crontab -
+            log "INFO" "WEB自启功能已关闭"
+            ;;
+        3)
+            echo ""
+            ;;
+        *)
+            echo "[ERROR] 无效输入，操作已取消"
+            ;;
+    esac
+}
+
+start_web_service() {
+    while true; do
+        read -p "是否启动WEB服务？(y/n): " choice
+        case "${choice,,}" in
+            y|Y)
+                handle_web_command start
+                break
+                ;;
+            n|N)
+                echo "已取消启动WEB服务。"
+                break
+                ;;
+            *)
+                echo "无效输入，请输入 y/n or Y/N"
+                ;;
+        esac
+    done
+}
+
 handle_web_command() {
     local cmd=$1; shift
     case "$cmd" in
+        cron)
+            manage_web_autostart
+            ;;
         start)
             if [ -f "$WEB_PID_FILE" ]; then
                 local pid=$(<"$WEB_PID_FILE")
@@ -1496,7 +1590,8 @@ handle_command() {
             initialize_iptables
             add_cron_tasks
             add_re_cron_task
-            handle_web_command start
+            manage_web_autostart
+            start_web_service
             ;;
         start)
             log "INFO" "启动Rent-PL服务"
@@ -1504,7 +1599,8 @@ handle_command() {
             restore_iptables_rules
             add_cron_tasks
             add_re_cron_task
-            handle_web_command start
+            manage_web_autostart
+            start_web_service
             ;;
         stop)
             log "INFO" "终止Rent-PL服务"
@@ -1543,13 +1639,19 @@ handle_command() {
             log "INFO" "恢复Rent-PL服务"
             save_remaining_limits
             restore_iptables_rules
+            ;;
+        recover_web)
+            log "INFO" "恢复WEB服务"
             handle_web_command start
             ;;
         clear)
             clear_log
             ;;
         update)
-            update_auto
+            update_auto "https://raw.githubusercontent.com/BlackSheep-cry/Rent-PL/main/rent.sh"
+            ;;
+        dev)
+            update_auto "https://raw.githubusercontent.com/BlackSheep-cry/Rent-PL/main/rent_dev.sh"
             ;;
         uninstall)
             handle_command stop
