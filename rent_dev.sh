@@ -1,19 +1,13 @@
 #!/usr/bin/env bash
-### === 脚本描述 === ###
-# 名称: Rent-PL
-# 功能: 对用户指定的端口组进行流量统计、限制及周期性重置
-# 作者: BlackSheep <https://www.nodeseek.com/space/15055>
-# 创建日期: 2025-03-29
-# 许可证: GPLv3
 
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 [[ $EUID -ne 0 ]] && echo "[ERROR] 请以root用户或sudo运行此脚本！" && exit 1
 
-SCRIPT_VERSION="V0.8.4-alpha1"
+SCRIPT_VERSION="V0.9.0-alpha1"
 SCRIPT_NAME="Rent-PL"
 SCRIPT_AUTHOR="@BlackSheep <https://www.nodeseek.com/space/15055>"
-UPDATE_NOTES="1.优化更新功能，增加dev版和更新说明\n2.提高WEB功能的独立性，添加WEB开机自启管理"
+UPDATE_NOTES="1.流量可不设限制"
 MAX_LOG_SIZE=524288
 IPTABLES_PATH="$(command -v iptables)"
 IP6TABLES_PATH="$(command -v ip6tables)"
@@ -72,8 +66,8 @@ init_config() {
 # 配置格式：单端口/端口范围/两者的自由组合 月度流量限制(GiB) 重置日期(1-28日)
 # 例如：
 # 6020-6030 100.00 1
+# 5201,5202-5205 unlimited 20
 # 443,80 1.5 15
-# 5201,5202-5205 1 20 
 # 7020-7030,7090-7095,7096-8000 10 12
 EOF
     fi
@@ -304,6 +298,13 @@ save_traffic_usage() {
         out_bytes=$(convert_scientific_notation "${out_bytes:-0}")
         total_bytes=$((in_bytes + out_bytes))
 
+        traffic_data+="$port_range $in_bytes $out_bytes"$'\n'
+
+        if [[ "$limit" == "unlimited" ]]; then
+            log "INFO" "端口 $port_range: 入站 $in_bytes 字节, 出站 $out_bytes 字节, 总计 $total_bytes 字节, 限制 ∞ 字节"
+            continue
+        fi
+
         limit_bytes=$(echo "$limit * 1024 ^ 3" | bc -l)
         limit_bytes=$(convert_scientific_notation "$limit_bytes")
 
@@ -321,8 +322,6 @@ save_traffic_usage() {
                 fi
             fi
         fi
-
-        traffic_data+="$port_range $in_bytes $out_bytes"$'\n'
     done < <(grep -vE '^[[:space:]]*#|^$' "$CONFIG_FILE")
 
     echo "$traffic_data" > "${TRAFFIC_SAVE_FILE}.tmp" && mv -f "${TRAFFIC_SAVE_FILE}.tmp" "$TRAFFIC_SAVE_FILE"
@@ -378,7 +377,11 @@ show_stats() {
 
         echo "端口范围 $port_range:"
         echo "  当前使用：$total_gb GiB"
-        echo "  本月限制：$limit GiB"
+        if [[ "$limit" == "unlimited" ]]; then
+            echo "  本月限制：Unlimited"
+        else
+            echo "  本月限制：$limit GiB"
+        fi
         echo "  重置日期：每月 $reset_day 日"
         echo "  当前状态：$status"
         echo "-------------------"
@@ -408,6 +411,11 @@ save_remaining_limits() {
 
     while read -r port_range original_limit reset_day; do
         [[ "$port_range" =~ ^#.*$ || -z "$port_range" ]] && continue
+
+        if [[ "$original_limit" == "unlimited" ]]; then
+            echo "$port_range unlimited $reset_day" >> "$temp_config_file"
+            continue
+        fi
 
         local saved_in_bytes=$(convert_scientific_notation "${saved_in["$port_range"]:-0}")
         local saved_out_bytes=$(convert_scientific_notation "${saved_out["$port_range"]:-0}")
@@ -683,10 +691,27 @@ add_iptables_range() {
         return 1
     fi
 
-    local limit
-    until [[ "${limit}" =~ ^[0-9]+(\.[0-9]+)?$ ]]; do
-        echo "请输入月度流量限制 (如:100.00)，单位GiB:"
-        read -r limit
+    local limit input
+    while true; do
+        echo "是否设置流量限制？ (y/n):"
+        read -r input
+        input=${input,,}
+        case "$input" in
+            y)
+                until [[ "${limit}" =~ ^[0-9]+(\.[0-9]+)?$ ]]; do
+                    echo "请输入流量限制数值（单位GiB，允许小数，如 100.50）:"
+                    read -r limit
+                done
+                break
+                ;;
+            n)
+                limit="unlimited"
+                break
+                ;;
+            *)
+                echo "无效输入，请选择 y（设置限制）或 n（无限制）"
+                ;;
+        esac
     done
 
     log "INFO" "添加 iptables 规则 (端口范围: ${selected_range})"
@@ -701,7 +726,7 @@ add_iptables_range() {
     add_re_cron_task "${selected_range}" "${reset_day}"
     save_iptables_rules
 
-    log "INFO" "端口 ${selected_range} 的iptables规则及定时任务已配置，流量限制${limit}GiB"
+    log "INFO" "端口 ${selected_range} 的iptables规则及定时任务已配置，流量限制 ${limit} GiB"
 }
 
 re_iptables_range() {
@@ -801,7 +826,7 @@ update_auto() {
             fi
             
             if mv -f "$tmp_file" "$install_path"; then
-                log "INFO" "脚本已成功更新到 $new_version !"
+                log "INFO" "脚本已成功更新到 $new_version"
                 echo "[INFO] 建议使用 restart 命令重启服务以应用更新"
             else
                 log "ERROR" "替换脚本失败"
@@ -973,6 +998,7 @@ generate_html() {
         .stat-item p { color: #666; margin: 8px 0; }
         .remaining { color: #1E90FF; font-weight: bold; }
         .limit { color: #FFA500; font-weight: bold; }
+        .infinity { font-size: 1.8em; vertical-align: middle; margin: 0 2px; }
         .reset-day { color: #27ae60; }
         .progress { 
             height: 25px;
@@ -1010,6 +1036,7 @@ generate_html() {
             .stat-item { padding: 8px; }
             .stat-item h3 { font-size: 16px; }
             .progress-percent { font-size: 12px; }
+            .infinity { font-size: 1.5em; vertical-align: text-bottom; margin: 0 1px; line-height: 0.8; }
         }
     </style>
 </head>
@@ -1041,35 +1068,46 @@ EOF
                       $(convert_scientific_notation "$ipv6_in") + \
                       $(convert_scientific_notation "$ipv6_out")))
 
+    if [[ "$cp_limit" == "unlimited" ]]; then
+        limit_gb_display="<span class='infinity'>∞</span>"
+        progress=100
+        progress_display="<span class='infinity'>∞</span>"
+        remaining_gb="<span class='infinity'>∞</span>"
+        bar_color="#2196F3"
+    else
+        limit_gb_display=$(awk "BEGIN { printf \"%.2f\", $cp_limit }")
         used_gb=$(awk "BEGIN { printf \"%.2f\", $total_bytes / 1073741824 }")
         limit_gb=$(awk "BEGIN { printf \"%.2f\", $limit }")
         remaining_gb=$(awk "BEGIN { r = $limit_gb - $used_gb; printf \"%.2f\", r < 0 ? 0 : r }")
-        limit_gb_display=$(awk "BEGIN { printf \"%.2f\", $cp_limit }")
+    fi
 
-        if $IPTABLES_PATH -L PORT_IN -n 2>/dev/null | grep -qE "DROP.*($regex_part)" ||
-           $IP6TABLES_PATH -L PORT_IN -n 2>/dev/null | grep -qE "DROP.*($regex_part)"; then
-            status="已暂停"
-            status_class="status-paused"
-        else
-            status="正常"
-            status_class="status-active"
-        fi
-
-        if [[ "$cp_limit" =~ ^[0-9.]+$ ]] && (( $(echo "$cp_limit > 0" | bc -l) )); then
-            progress=$(awk "BEGIN { p = ($remaining_gb / $cp_limit) * 100; p = (p < 0 ? 0 : p); printf \"%.0f\", p }")
-            if (( progress > 0 && progress < 5 )); then progress=5; fi
-            (( progress > 100 )) && progress=100
-        else
-            progress=0
-        fi
-
+    if [[ "$cp_limit" =~ ^[0-9.]+$ ]] && (( $(echo "$cp_limit > 0" | bc -l) )); then
+        progress=$(awk "BEGIN { p = ($remaining_gb / $cp_limit) * 100; p = (p < 0 ? 0 : p); printf \"%.0f\", p }")
+        (( progress > 0 && progress < 5 )) && progress=5
+        (( progress > 100 )) && progress=100
+        progress_display="${progress}%"
+        
         if [[ $progress -ge 70 ]]; then
             bar_color="#4CAF50"
         elif [[ $progress -ge 30 ]]; then
-            bar_color="#ffa500"
+            bar_color="#FFA500"
         else
-            bar_color="#ff4444"
+            bar_color="#FF4444"
         fi
+    elif [[ "$cp_limit" != "unlimited" ]]; then
+        progress=0
+        progress_display="N/A"
+        bar_color="#e0e0e0"
+    fi
+
+    if $IPTABLES_PATH -L PORT_IN -n 2>/dev/null | grep -qE "DROP.*($regex_part)" ||
+       $IP6TABLES_PATH -L PORT_IN -n 2>/dev/null | grep -qE "DROP.*($regex_part)"; then
+        status="已暂停"
+        status_class="status-paused"
+    else
+        status="正常"
+        status_class="status-active"
+    fi
 
         cat <<EOF >> "$HTML_TMP_FILE"
             <div class="stat-item">
@@ -1077,7 +1115,7 @@ EOF
                 <p>剩余流量: <span class="remaining">${remaining_gb}</span> GiB / 限额: <span class="limit">${limit_gb_display}</span> GiB</p>
                 <div class="progress">
                     <div class="progress-bar" style="width: ${progress}%; background-color: ${bar_color};"></div>
-                    <span class="progress-percent">${progress}%</span>
+                    <span class="progress-percent">${progress_display}</span>
                 </div>
                 <p>重置日期: 每月 <span class="reset-day">${reset_day}</span> 日 | 状态: <span class="${status_class}">${status}</span></p>
             </div>
@@ -1412,11 +1450,28 @@ set_rent_config() {
           done
 
           while :; do
-              read -p "请输入月流量限制（单位GiB，支持两位小数）：" traffic
-              if [[ "$traffic" =~ ^[0-9]+(\.[0-9]{1,2})?$ ]]; then
-                  break
-              fi
-              echo "[ERROR] 无效格式！示例：100 或 50.5 或 25.75"
+              read -p "是否设置月流量限制？ (y/n): " choice
+              choice=$(echo "$choice" | tr '[:upper:]' '[:lower:]')
+
+              case "$choice" in
+                  y)
+                      while :; do
+                          read -p "请输入月流量限制（单位GiB，支持两位小数）：" traffic
+                          if [[ "$traffic" =~ ^[0-9]+(\.[0-9]{1,2})?$ ]]; then
+                              break
+                          fi
+                          echo "[ERROR] 无效格式！示例：100 或 50.5 或 25.75"
+                      done
+                      break
+                      ;;
+                  n)
+                      traffic="unlimited"
+                      break
+                      ;;
+                  *)
+                      echo "[ERROR] 请输入 y 或 n（y=设置限制，n=无限制）"
+                      ;;
+              esac
           done
 
           while :; do
