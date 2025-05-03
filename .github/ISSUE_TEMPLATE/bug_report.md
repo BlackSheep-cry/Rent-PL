@@ -13,6 +13,6 @@ about: 提交代码或脚本运行中的具体问题
 你预期的脚本行为和与之不符的实际脚本行为
 
 ### 报错及日志
-请附上报错信息和对应的日志 , 日志文件在/var/log/rent.log和/tmp/web_service.log
+请附上报错信息和相应的日志 , 可输入`sudo rent.sh log`查看部分日志，完整日志在/var/log/rent.log和/tmp/web_service.log
 
 ### 复现方法
