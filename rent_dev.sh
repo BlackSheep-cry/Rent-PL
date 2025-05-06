@@ -4,7 +4,7 @@ export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 [[ $EUID -ne 0 ]] && echo "[ERROR] 请以root用户或sudo运行此脚本！" && exit 1
 
-SCRIPT_VERSION="V0.9.0-alpha1"
+SCRIPT_VERSION="V0.9.0-alpha2"
 SCRIPT_NAME="Rent-PL"
 SCRIPT_AUTHOR="@BlackSheep <https://www.nodeseek.com/space/15055>"
 UPDATE_NOTES="1.流量可不设限制"
@@ -36,7 +36,7 @@ CFPATHS=(
 
 check_dependencies() {
     local deps=(
-        "iptables" "ip6tables" "crontab"
+        "sudo" "iptables" "ip6tables" "crontab"
         "awk" "sed" "grep" "date" "ps" "nano"
         "bc" "wget" "openssl" "python3"
     )
