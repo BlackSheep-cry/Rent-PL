@@ -4,10 +4,10 @@ export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 [[ $EUID -ne 0 ]] && echo "[ERROR] 请以root用户或sudo运行此脚本！" && exit 1
 
-SCRIPT_VERSION="V0.8.4"
+SCRIPT_VERSION="V0.8.5"
 SCRIPT_NAME="Rent-PL"
 SCRIPT_AUTHOR="@BlackSheep <https://www.nodeseek.com/space/15055>"
-UPDATE_NOTES="1.优化更新功能，增加dev版和更新说明\n2.增强WEB功能独立性，添加WEB开机自启管理"
+UPDATE_NOTES="1.添加sudo命令的检查"
 MAX_LOG_SIZE=524288
 IPTABLES_PATH="$(command -v iptables)"
 IP6TABLES_PATH="$(command -v ip6tables)"
@@ -36,7 +36,7 @@ CFPATHS=(
 
 check_dependencies() {
     local deps=(
-        "iptables" "ip6tables" "crontab"
+        "sudo" "iptables" "ip6tables" "crontab"
         "awk" "sed" "grep" "date" "ps" "nano"
         "bc" "wget" "openssl" "python3"
     )
