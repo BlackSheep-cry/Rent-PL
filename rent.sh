@@ -4,10 +4,10 @@ export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 [[ $EUID -ne 0 ]] && echo "[ERROR] 请以root用户或sudo运行此脚本！" && exit 1
 
-SCRIPT_VERSION="V0.8.5"
+SCRIPT_VERSION="V0.8.6"
 SCRIPT_NAME="Rent-PL"
 SCRIPT_AUTHOR="@BlackSheep <https://www.nodeseek.com/space/15055>"
-UPDATE_NOTES="1.添加sudo命令的检查"
+UPDATE_NOTES="1.修复多个端口组同一天重置流量时可能出现的配置更新错误\n2.优化status输出，改为显示剩余流量\n3.优化配置读取逻辑\n4.去除WEB进度百分比的5%保底"
 MAX_LOG_SIZE=524288
 IPTABLES_PATH="$(command -v iptables)"
 IP6TABLES_PATH="$(command -v ip6tables)"
@@ -27,6 +27,7 @@ PASSWORD_FILE="/etc/rent/web_pass"
 RED='\033[0;31m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
+GREEN='\033[0;32m'
 NC='\033[0m'
 
 CFPATHS=(
@@ -38,7 +39,7 @@ check_dependencies() {
     local deps=(
         "sudo" "iptables" "ip6tables" "crontab"
         "awk" "sed" "grep" "date" "ps" "nano"
-        "bc" "wget" "openssl" "python3"
+        "bc" "wget" "openssl" "python3" "flock"
     )
     for cmd in "${deps[@]}"; do
         if ! command -v "$cmd" &>/dev/null; then
@@ -330,23 +331,39 @@ convert_scientific_notation() {
 show_stats() {
     echo "当前流量使用情况（包含IPv4/IPv6）："
 
-    while IFS=$' \t' read -r port_range limit reset_day _extra || [[ -n "$port_range" ]]; do
+    declare -A cp_limits
+    while IFS=$' \t' read -r cp_port_range cp_limit _; do
+        cp_port_range=${cp_port_range%$'\r'}
+        cp_limit=${cp_limit%$'\r'}
+        [[ "$cp_port_range" =~ ^[[:space:]]*# || -z "$cp_port_range" ]] && continue
+        if [[ -z "$cp_limit" ]]; then
+            log "ERROR" "无效的副本配置行: $cp_port_range $cp_limit" >&2
+            continue
+        fi
+        cp_limits["$cp_port_range"]=$cp_limit
+    done < <(grep -vE '^[[:space:]]*#|^$' "$CP_FILE")
+
+    while IFS=$' \t' read -r port_range limit reset_day _extra; do
         port_range=${port_range%$'\r'}
         limit=${limit%$'\r'}
         reset_day=${reset_day%$'\r'}
 
         [[ "$port_range" =~ ^[[:space:]]*# || -z "$port_range" ]] && continue
-
         if [[ -z "$limit" || -z "$reset_day" || -n "$_extra" ]]; then
-            echo " [ERROR] 无效配置行: $port_range $limit $reset_day" >&2
+            log "ERROR" "无效的配置行: $port_range $limit $reset_day" >&2
             continue
         fi
 
-        regex_part=$(echo "$port_range" | sed 's/,/|/g' | sed 's/-/:/')
+        if [[ -z "${cp_limits[$port_range]}" ]]; then
+            log "ERROR" "端口范围 ${port_range} 未在CP_FILE中定义" >&2
+            continue
+        fi
+        cp_limit="${cp_limits[$port_range]}"
+
+        regex_part=$(echo "$port_range" | sed 's/,/|/g; s/-/:/g')
 
         ipv4_in=$( $IPTABLES_PATH -L PORT_IN -nvx | grep -E "(dports)[[:space:]]+${regex_part}\\b" | awk '{sum+=$2} END{print sum}' )
         ipv4_out=$( $IPTABLES_PATH -L PORT_OUT -nvx | grep -E "(sports)[[:space:]]+${regex_part}\\b" | awk '{sum+=$2} END{print sum}' )
-
         ipv6_in=$( $IP6TABLES_PATH -L PORT_IN -nvx | grep -E "(dports)[[:space:]]+${regex_part}\\b" | awk '{sum+=$2} END{print sum}' )
         ipv6_out=$( $IP6TABLES_PATH -L PORT_OUT -nvx | grep -E "(sports)[[:space:]]+${regex_part}\\b" | awk '{sum+=$2} END{print sum}' )
 
@@ -361,21 +378,41 @@ show_stats() {
         ipv6_out=$(convert_scientific_notation "$ipv6_out")
 
         total_bytes=$(( ipv4_in + ipv4_out + ipv6_in + ipv6_out ))
-        total_gb=$(printf "%.2f" "$(echo "scale=2; $total_bytes/1024/1024/1024" | bc)")
+        used_gb=$(awk "BEGIN { printf \"%.2f\", $total_bytes / 1073741824 }")
+        limit_gb=$(awk "BEGIN { printf \"%.2f\", $limit }")
+        remaining_gb=$(awk "BEGIN { r = $limit_gb - $used_gb; printf \"%.2f\", r < 0 ? 0 : r }")
+        limit_gb_display=$(awk "BEGIN { printf \"%.2f\", $cp_limit }")
+
+        if [[ "$cp_limit" =~ ^[0-9.]+$ ]] && (( $(echo "$cp_limit > 0" | bc -l) )); then
+            progress=$(awk "BEGIN { p = ($remaining_gb / $cp_limit) * 100; p = (p < 0 ? 0 : p); printf \"%.0f\", p }")
+            (( progress > 100 )) && progress=100
+        else
+            progress=0
+        fi
 
         ipv4_rules=$($IPTABLES_PATH -L PORT_IN -n)
         ipv6_rules=$($IP6TABLES_PATH -L PORT_IN -n)
         status="正常"
+        status_color="${GREEN}"
         if echo "$ipv4_rules $ipv6_rules" | grep -qE "DROP.*multiport.*($regex_part)"; then
             status="已暂停"
+            status_color="${RED}"
         fi
 
-        echo "端口范围 $port_range:"
-        echo "  当前使用：$total_gb GiB"
-        echo "  本月限制：$limit GiB"
-        echo "  重置日期：每月 $reset_day 日"
-        echo "  当前状态：$status"
-        echo "-------------------"
+        echo -e "端口范围 ${port_range}:"
+        echo -e "  剩余流量: ${remaining_gb} GiB"
+        echo -e "  月度限制: ${limit_gb_display} GiB"
+        echo -e "  可用比例:${NC} $( 
+            if [ $(echo "$progress >= 70" | bc) -eq 1 ]; then
+                echo "${GREEN}${progress}%${NC}"
+            elif [ $(echo "$progress >= 30" | bc) -eq 1 ]; then
+                echo "${YELLOW}${progress}%${NC}"
+            else
+                echo "${RED}${progress}%${NC}"
+            fi )"
+        echo -e "  当前状态:${NC} ${status_color}${status}${NC}"
+        echo -e "  重置日期: 每月 ${reset_day} 日"
+        echo -e "-------------------"
     done < <(grep -vE '^[[:space:]]*#|^$' "$CONFIG_FILE")
 }
 
@@ -705,7 +742,30 @@ re_iptables_range() {
         read -r selected_range
     fi
 
+    exec 9>>"${CONFIG_FILE}"
+    flock -x 9
+
+    local cp_matched_rule=""
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        line=${line%$'\r'}
+        [[ "$line" =~ ^#.*$ || -z "$line" ]] && continue
+        port_range=$(awk '{print $1}' <<< "$line")
+        if [[ "$port_range" == "$selected_range" ]]; then
+            cp_matched_rule="$line"
+            break
+        fi
+    done < "${CP_FILE}"
+
+    if [[ -z "$cp_matched_rule" ]]; then
+        log "ERROR" "在副本配置文件 ${CP_FILE} 中未找到端口范围 ${selected_range} 的原始配置"
+        flock -u 9
+        return 1
+    fi
+
+    read -r matched_port matched_limit matched_day <<< "$cp_matched_rule"
+
     local tmp_file=$(mktemp)
+    local found=0
     
     while IFS=$' \t' read -r port_range limit reset_day _extra || [[ -n "$port_range" ]]; do
         port_range=${port_range%$'\r'}
@@ -720,37 +780,25 @@ re_iptables_range() {
         fi
 
         if [[ "${port_range}" == "${selected_range}" ]]; then
-            handle_port_rules "-D" "${port_range}" "ACCEPT,DROP"
+            echo "${matched_port} ${matched_limit} ${matched_day}" >> "${tmp_file}"
+            updated=1
         else
             echo "${port_range} ${limit} ${reset_day}" >> "${tmp_file}"
         fi
     done < <(grep -vE '^[[:space:]]*#|^$' "${CONFIG_FILE}")
 
-    mv "${tmp_file}" "${CONFIG_FILE}"
-
-    local cp_tmp=$(mktemp)
-    local cp_matched_rule=""
-    while IFS= read -r line || [[ -n "$line" ]]; do
-        line=${line%$'\r'}
-        port_range=$(awk '{print $1}' <<< "$line")
-        if [[ "$port_range" == "$selected_range" ]]; then
-            cp_matched_rule="$line"
-        else
-            echo "$line" >> "$cp_tmp"
-        fi
-    done < "${CP_FILE}"
-    if [[ -n "$cp_matched_rule" ]]; then
-        mv "$cp_tmp" "${CP_FILE}"
-        echo "$cp_matched_rule" | tee -a "${CP_FILE}" "${CONFIG_FILE}" >/dev/null
-        read -r matched_port matched_limit matched_day <<< "$cp_matched_rule"
-        handle_port_rules "-A" "$matched_port" "ACCEPT"
+    if (( updated )); then
+        mv "${tmp_file}" "${CONFIG_FILE}"
+        handle_port_rules "-D" "${selected_range}" "ACCEPT,DROP"
+        handle_port_rules "-A" "${selected_range}" "ACCEPT"
+        save_iptables_rules 
+        log "INFO" "已成功重置端口 ${selected_range} 的流量"
     else
-        rm "$cp_tmp"
-        echo "[ERROR] 未找到与端口范围 ${selected_range} 匹配的备份规则."
+        rm -f "${tmp_file}"
+        log "ERROR" "配置文件中未找到需要重置的端口 ${selected_range}"
     fi
 
-    save_iptables_rules
-    log "INFO" "已重置端口 ${selected_range} 的流量"
+    flock -u 9
 }
 
 update_auto() {
@@ -1013,15 +1061,34 @@ generate_html() {
         <div class='stats'>
 EOF
 
-    while IFS=$' \t' read -r port_range limit reset_day _extra <&3 &&
-          IFS=$' \t' read -r cp_port_range cp_limit cp_reset_day _cp_extra <&4; do
+    declare -A cp_limits
+    while IFS=$' \t' read -r cp_port_range cp_limit _; do
+        cp_port_range=${cp_port_range%$'\r'}
+        cp_limit=${cp_limit%$'\r'}
+        [[ "$cp_port_range" =~ ^[[:space:]]*# || -z "$cp_port_range" ]] && continue
+        if [[ -z "$cp_limit" ]]; then
+            log "ERROR" "无效的副本配置行: $cp_port_range" >&2
+            continue
+        fi
+        cp_limits["$cp_port_range"]=$cp_limit
+    done < <(grep -vE '^[[:space:]]*#|^$' "$CP_FILE")
+
+    while IFS=$' \t' read -r port_range limit reset_day _extra; do
         port_range=${port_range%$'\r'}
         limit=${limit%$'\r'}
         reset_day=${reset_day%$'\r'}
-        cp_limit=${cp_limit%$'\r'}
 
         [[ "$port_range" =~ ^[[:space:]]*# || -z "$port_range" ]] && continue
-        [[ -z "$limit" || -z "$reset_day" || -n "$_extra" ]] && continue
+        if [[ -z "$limit" || -z "$reset_day" || -n "$_extra" ]]; then
+            log "ERROR" "无效的配置行: $port_range $limit $reset_day" >&2
+            continue
+        fi
+
+        if [[ -z "${cp_limits[$port_range]}" ]]; then
+            log "ERROR" "端口范围 ${port_range} 未在CP_FILE中定义" >&2
+            continue
+        fi
+        cp_limit="${cp_limits[$port_range]}"
 
         regex_part=$(echo "$port_range" | sed 's/,/|/g; s/-/:/g')
 
@@ -1051,7 +1118,6 @@ EOF
 
         if [[ "$cp_limit" =~ ^[0-9.]+$ ]] && (( $(echo "$cp_limit > 0" | bc -l) )); then
             progress=$(awk "BEGIN { p = ($remaining_gb / $cp_limit) * 100; p = (p < 0 ? 0 : p); printf \"%.0f\", p }")
-            if (( progress > 0 && progress < 5 )); then progress=5; fi
             (( progress > 100 )) && progress=100
         else
             progress=0
@@ -1076,7 +1142,7 @@ EOF
                 <p>重置日期: 每月 <span class="reset-day">${reset_day}</span> 日 | 状态: <span class="${status_class}">${status}</span></p>
             </div>
 EOF
-    done 3< <(grep -vE '^[[:space:]]*#|^$' "$CONFIG_FILE") 4< <(grep -vE '^[[:space:]]*#|^$' "$CP_FILE")
+    done < <(grep -vE '^[[:space:]]*#|^$' "$CONFIG_FILE")
 
     cat >> "$HTML_TMP_FILE" <<EOF
         </div>
